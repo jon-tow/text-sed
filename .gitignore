@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Common data dirs
+data/
+tmp/
+checkpoints/
+wandb/
