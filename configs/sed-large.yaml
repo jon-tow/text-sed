@@ -1,15 +1,15 @@
-name: text-sed-default
+name: sed-large
 output_dir: checkpoints/${name}
 seed: 2617
 
 model:
   embed_model_name: bert-base-uncased
   num_layers: 12
-  model_dim: 896
+  model_dim: 1536
   num_heads: 16
-  head_dim: 64
-  seq_len: 128
-  max_gen_len: 128
+  head_dim: 128
+  seq_len: 256
+  max_gen_len: 256
   scale: 1.0
   num_steps: 1000
   num_gen_steps: 1000
@@ -19,8 +19,8 @@ model:
   time_delta: 0.0
 
 train:
-  batch_size: 32
-  max_steps: 1000000  # 1e6
+  batch_size: 256
+  max_steps: 2000000  # 2e6
   resume: false
   eval_every: 1000
   log_every: 100
@@ -30,7 +30,7 @@ train:
   resume_path: null
 
 valid:
-  batch_size: 64
+  batch_size: 256
   max_steps: 1000
 
 data:

@@ -1,4 +1,4 @@
-name: text-sed-default
+name: sed-small
 output_dir: checkpoints/${name}
 seed: 2617
 
@@ -8,8 +8,8 @@ model:
   model_dim: 896
   num_heads: 16
   head_dim: 64
-  seq_len: 128
-  max_gen_len: 128
+  seq_len: 256
+  max_gen_len: 256
   scale: 1.0
   num_steps: 1000
   num_gen_steps: 1000
