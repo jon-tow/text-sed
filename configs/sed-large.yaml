@@ -3,7 +3,7 @@ output_dir: checkpoints/${name}
 seed: 2617
 
 model:
-  embed_model_name: bert-base-uncased
+  embed_model_name: bert-base-cased
   num_layers: 12
   model_dim: 1536
   num_heads: 16
@@ -21,7 +21,6 @@ model:
 train:
   batch_size: 256
   max_steps: 2000000  # 2e6
-  resume: false
   eval_every: 1000
   log_every: 100
   save_every: 10000

@@ -97,7 +97,6 @@ def train(
                 checkpoint = {
                     "model": inner_model.state_dict(),
                     "optimizer": optimizer.state_dict(),
-                    # "lr_schedule": lr_schedule.state_dict(),
                     "step": step,
                     "config": config,
                 }
@@ -133,7 +132,6 @@ def train(
             checkpoint = {
                 "model": inner_model.state_dict(),
                 "optimizer": optimizer.state_dict(),
-                # "lr_schedule": lr_schedule.state_dict(),
                 "step": step,
                 "config": config,
             }
@@ -215,7 +213,6 @@ if __name__ == "__main__":
         embed_mat=embed_mat,
         noise_schedule=diffusion.get_noise_schedule(config.model.noise_schedule),
     )
-    logger.info(f"Parameter count: ~{format(utils.param_count(model), ',')}")
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.optimizer.lr,
@@ -223,13 +220,8 @@ if __name__ == "__main__":
         betas=tuple(config.optimizer.betas),
         eps=config.optimizer.eps,
     )
-
-    # Initialize lr scheduler
-    # if config.lr_scheduler.type == "linear":
-    #     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
-    #         optimizer,
-    #         lambda step: max(0, 1 - step / config.train.max_steps),
-    #     )
+    
+    logger.info(f"Parameter count: ~{format(utils.param_count(model), ',')}")
 
     # Load checkpoints if resuming training
     if config.train.resume_path is not None:

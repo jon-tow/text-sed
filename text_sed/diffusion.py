@@ -9,6 +9,7 @@ from einops import reduce
 
 # Torch Type Hints
 from typing import Callable, NewType, Literal, Optional, Tuple
+
 Device = NewType("Device", torch.device)
 DType = NewType("DType", torch.dtype)
 Shape = NewType("Shape", Tuple[int, ...])
@@ -35,8 +36,10 @@ def get_noise_schedule(schedule_name: str, **kwargs) -> Callable:
 
 def linear_schedule(start: float, end: float) -> Tensor:
     """Linear noise-variance (β) schedule."""
+
     def scheduler(num_steps: int):
         return torch.linspace(start, end, num_steps)
+
     return scheduler
 
 
@@ -53,6 +56,7 @@ def betas_for_alpha_bar(
             [0, 1] and produces the cumulative prod of (1 - β)
         max_beta: The max β to use.
     """
+
     def scheduler(num_steps: int):
         betas = []
         for i in range(num_steps):
@@ -60,6 +64,7 @@ def betas_for_alpha_bar(
             a2 = alpha_bar((i + 1) / num_steps)
             betas.append(min(1 - a2 / a1, max_beta))
         return torch.Tensor(betas)
+
     return scheduler
 
 
@@ -76,8 +81,10 @@ def cosine_beta_schedule(
         offset: Small offset to prevent βₜ from beeing too small near
             t = 0.
     """
+
     def scheduler(num_steps: int):
         return torch.cos(((num_steps + offset) / (1 + offset)) * (torch.pi / 2)) ** 2
+
     return betas_for_alpha_bar(scheduler, max_beta)
 
 
@@ -110,8 +117,10 @@ def cosine_alpha_bar_schedule(
         offset: Small offset to prevent βₜ from beeing too small near
             t = 0.
     """
+
     def scheduler(num_steps: float):
         return cosine_alpha_bar(time=num_steps, offset=offset)
+
     return scheduler
 
 
@@ -168,7 +177,7 @@ def corrupt(
     """
     noise = torch.randn(inputs.shape, device=inputs.device)  # ϵ
 
-    signal_rate = torch.sqrt(schedule(time))     # √ᾱₜ
+    signal_rate = torch.sqrt(schedule(time))  # √ᾱₜ
     noise_rate = torch.sqrt(1 - schedule(time))  # √(1 - ᾱₜ)
 
     signal_rate = left_broadcast_to(signal_rate, inputs.shape)
@@ -177,13 +186,13 @@ def corrupt(
 
 
 def ddim_step(
-    noisy_inputs: Tensor,  # xₜ
-    pred_inputs: Tensor,   # x̃₀
-    time_now: Tensor,      # t
-    time_next: Tensor,     # t - 1
+    noisy_inputs: Tensor, # xₜ
+    pred_inputs: Tensor,  # x̃₀
+    time_now: Tensor,     # t
+    time_next: Tensor,    # t - 1
     schedule: Callable,
-    scale: Optional[float] = 1.0,
-) -> Tensor:               # xₜ₋₁
+    # scale: Optional[float] = 1.0,
+) -> Tensor:              # xₜ₋₁
     """Denoising diffusion implicit model step with η = 0. Estimates x₀ at
     time_next with the DDIM updating rule.
 
@@ -280,15 +289,18 @@ class TextSed(nn.Module):
             time_next = torch.tensor([
                 torch.maximum(
                     torch.tensor(1 - (step + 1 + time_delta) / num_steps),
-                    torch.tensor(0.0)
-                )], device=device)
+                    torch.tensor(0.0),
+                )],
+                device=device,
+            )
 
             # Predict start embeds
             if not use_self_cond:
                 pred_embeds = torch.zeros_like(rand_embeds, device=device)
             pred_embeds = self.model(
                 torch.concat([rand_embeds, pred_embeds], -1),
-                time_now)
+                time=time_now,
+            )
 
             # Estimate embeds at time_next
             rand_embeds = step_fn(
@@ -296,7 +308,8 @@ class TextSed(nn.Module):
                 pred_embeds,
                 time_now,
                 time_next,
-                self.noise_schedule)
+                self.noise_schedule,
+            )
 
         # Token decoding: continous embeddings to discrete tokens
         pred_logits = self.reader.unembed(pred_embeds)
@@ -324,16 +337,15 @@ class TextSed(nn.Module):
             if use_self_cond and torch.rand((1,)).item() > 0.5:
                 cond_embeds = self.model(
                     torch.concat([noisy_embeds, cond_embeds], -1),
-                    time
+                    time=time
                 )
 
         # Predict embeddings
-        pred_embeds = self.model(torch.concat(
-            [noisy_embeds, cond_embeds], -1), time)
+        pred_embeds = self.model(torch.concat([noisy_embeds, cond_embeds], -1), time)
         logits = self.reader.unembed(pred_embeds)
 
         # Diffusion and Reconstruction loss
-        loss_mse = F.mse_loss(pred_embeds, target=embeds, reduction='mean')
+        loss_mse = F.mse_loss(pred_embeds, target=embeds, reduction="mean")
         loss_recon = cross_entropy_loss(logits, targets=input, z_loss=z_loss)
         loss = loss_mse + loss_recon
 

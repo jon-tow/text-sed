@@ -7,3 +7,8 @@ Implementation of Strudel et al.'s ["Self-conditioned Embedding Diffusion for Te
 pip install torch --extra-index-url https://download.pytorch.org/whl/cu116
 pip install -e ".[dev, train]"
 ```
+
+# TODOs
+
+- [ ] Add span masking.
+- [ ] Add guidance for conditional text generation.
