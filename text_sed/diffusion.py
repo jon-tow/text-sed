@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import layers
+import utils
 
 from einops import reduce
 
@@ -303,7 +304,7 @@ class TextSed(nn.Module):
         self,
         input: NamedTensor["batch", "pos", "embed"],
         use_self_cond: Optional[bool] = True,
-        z_loss: Optional[float] = 0.0
+        z_loss: Optional[float] = 0.0,
     ) -> NamedTensor["batch", "pos", "embed"]:
         batch_size = input.shape[0]
 
@@ -331,10 +332,12 @@ class TextSed(nn.Module):
         # Diffusion and Reconstruction loss
         loss_mse = F.mse_loss(pred_embeds, target=embeds, reduction='mean')
         loss_recon = cross_entropy_loss(logits, targets=input, z_loss=z_loss)
-
         loss = loss_mse + loss_recon
-        return loss, dict(
-            total_loss=loss,
-            loss_mse=loss_mse,
-            loss_recon=loss_recon,
+
+        return loss, utils.flatten_dict(
+            dict(
+                total_loss=loss,
+                loss_mse=loss_mse,
+                loss_recon=loss_recon,
+            )
         )
