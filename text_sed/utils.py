@@ -43,28 +43,37 @@ def text_dataloader(
     per_gpu_batch_size: int,
     max_seq_len: int,
     num_workers: Optional[int] = 0,
+    use_infinite_sampler: bool = False,
 ):
     tokenized_dataset = dataset.map(
         partial(tokenize_fn, tokenizer=tokenizer, max_length=max_seq_len),
         batched=True,
         num_proc=num_workers,
     )
-    tokenized_dataset.set_format("pt", columns=["input_ids", "attention_mask"])
+    tokenized_dataset.set_format("pt", columns=["input_ids"])
     data_collator = transformers.DataCollatorWithPadding(
         tokenizer=tokenizer,
         return_tensors="pt",
     )
-    sampler = BatchSampler(
-        RandomSampler(dataset),
-        batch_size=per_gpu_batch_size,
-        drop_last=False
-    )
+    if use_infinite_sampler:
+        sampler = BatchSampler(
+            RandomSampler(dataset, replacement=True, num_samples=int(1e100)),
+            batch_size=per_gpu_batch_size,
+            drop_last=False
+        )
+    else:
+        sampler = BatchSampler(
+            RandomSampler(dataset),
+            batch_size=per_gpu_batch_size,
+            drop_last=False,
+        )
     dataloader = DataLoader(
         tokenized_dataset,
         sampler=sampler,
         drop_last=True,
         collate_fn=data_collator,
         num_workers=num_workers,
+        pin_memory=True,
     )
     return dataloader
 
@@ -79,7 +88,7 @@ def flatten_dict(d: dict, parent_key: Optional[str] = "") -> dict:
         if isinstance(v, dict):
             flat_d.update(flatten_dict(v, parent_key=f"{k}_"))
         else:
-            flat_d[f"{parent_key}{k}"] = v
+            flat_d[f"{parent_key}{k}"] = v.item() if isinstance(v, torch.Tensor) else v
     return flat_d
 
 
@@ -96,6 +105,9 @@ def get_rank():
 
 def is_main_process():
     return get_rank() == 0
+
+
+# Logging utils
 
 
 def init_logger(
