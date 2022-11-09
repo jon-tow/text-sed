@@ -1,0 +1,58 @@
+name: text-sed-default
+output_dir: checkpoints/${name}
+seed: 2617
+
+model:
+  embed_model_name: bert-base-uncased
+  num_layers: 12
+  model_dim: 768
+  num_heads: 16
+  head_dim: 64
+  seq_len: 32
+  max_gen_len: 32
+  scale: 1.0
+  num_steps: 1000
+  num_gen_steps: 1000
+  ema_decay: 0.9999
+  noise_schedule: cosine
+  use_self_cond: true
+  time_delta: 0.0
+
+train:
+  batch_size: 32
+  max_steps: 1e6
+  resume: false
+  eval_every: 1000
+  log_every: 100
+  save_every: 10000
+  sample_every: 1000
+  num_samples: 8
+  resume_path: null
+
+valid:
+  batch_size: 64
+  max_steps: 1000
+
+data:
+  name: imdb
+  subset_name: null
+  train_name: train
+  valid_name: test
+  use_auth_token: False
+  use_fast_tokenizer: True
+  num_preprocess_workers: 4
+
+optimizer:
+  type: adamw
+  lr: 0.0001
+  weight_decay: 0.01
+  eps: 1e-08
+  betas: [0.9, 0.999]
+  max_grad_norm: 1.0 
+
+logging:
+  use_wandb: true
+  wandb_id: null
+  wandb_entity: "jon-tow"
+  wandb_project: ${name}
+ 
