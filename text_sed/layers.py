@@ -1,5 +1,6 @@
 import math
 
+import transformers
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,21 +25,11 @@ def auto_extract_embed_mat(
     """Extracts a pre-trained word embedding lookup matrix, E ϵ Rᴰˣⱽ, from the
     specified model.
     """
-    from transformers import AutoConfig
-
     # Extract the pre-trained word embedding lookup table.
-    if "bert" in model_name:
-        from transformers import BertForPreTraining
-
-        config = AutoConfig.from_pretrained(model_name)
-        embed_model = BertForPreTraining.from_pretrained(model_name)
-
-        word_embeds = embed_model.bert.embeddings.word_embeddings
-        embed_mat, embed_dim = word_embeds.weight.detach(), config.hidden_size
-    else:
-        raise ValueError(
-            f"`{model_name}` is not a supported model. Manually extract the embeddings.")
-
+    embed_model = transformers.AutoModel.from_pretrained(model_name)
+    embeddings = embed_model.get_input_embeddings()
+    embed_mat = embeddings.get_parameter("weight").detach()
+    embed_dim = embeddings.embedding_dim
     del embed_model
     return embed_mat, embed_dim
 
