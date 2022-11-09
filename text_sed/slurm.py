@@ -13,6 +13,7 @@ import subprocess
 
 logger = getLogger()
 
+
 def sig_handler(signum, frame):
     logger.warning("Signal handler called with signal " + str(signum))
     prod_id = int(os.environ['SLURM_PROCID'])
@@ -61,25 +62,25 @@ def init_distributed_mode(args):
 
         # define master address and master port
         hostnames = subprocess.check_output(['scontrol', 'show', 'hostnames', os.environ['SLURM_JOB_NODELIST']])
-        args.main_addr = hostnames.split()[0].decode('utf-8')
-        assert 10001 <= args.main_port <= 20000 or args.world_size == 1
+        args.master_addr = hostnames.split()[0].decode('utf-8')
+        assert 10001 <= args.master_port <= 20000 or args.world_size == 1
 
         # set environment variables for 'env://'
-        os.environ['MASTER_ADDR'] = args.main_addr
-        os.environ['MASTER_PORT'] = str(args.main_port)
+        os.environ['MASTER_ADDR'] = args.master_addr
+        os.environ['MASTER_PORT'] = str(args.master_port)
         os.environ['WORLD_SIZE'] = str(args.world_size)
         os.environ['RANK'] = str(args.global_rank)
         is_distributed = True
 
-    # multi-GPU job (local or multi-node) - jobs started with torch.distributed.launch
+    # multi-GPU job (local or multi-node) - jobs started with torchrun
     elif has_local_rank and args.local_rank != -1:
 
-        assert args.main_port == -1
+        assert args.master_port == -1
 
         # read environment variables
+        args.local_rank = int(os.environ['LOCAL_RANK'])
         args.global_rank = int(os.environ['RANK'])
         args.world_size = int(os.environ['WORLD_SIZE'])
-
         is_distributed = True
 
     # Local job (single GPU)
@@ -104,4 +105,6 @@ def init_distributed_mode(args):
         torch.distributed.init_process_group(
             init_method='env://',
             backend='nccl',
+            world_size=args.world_size,
+            rank=args.global_rank,
         )

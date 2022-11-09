@@ -1,13 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import layers
-import utils
+
+from .layers import EmbeddingReader
+from .utils import flatten_dict
 
 from einops import reduce
 
 # Torch Type Hints
 from typing import Callable, NewType, Literal, Optional, Tuple
+Device = NewType("Device", torch.device)
 DType = NewType("DType", torch.dtype)
 Shape = NewType("Shape", Tuple[int, ...])
 Tensor = NewType("Tensor", torch.Tensor)
@@ -164,7 +166,7 @@ def corrupt(
     - "Denoising Diffusion Probabilistic Models" (Ho et al., 2020)
         https://arxiv.org/abs/2006.11239
     """
-    noise = torch.randn(inputs.shape)  # ϵ
+    noise = torch.randn(inputs.shape, device=inputs.device)  # ϵ
 
     signal_rate = torch.sqrt(schedule(time))     # √ᾱₜ
     noise_rate = torch.sqrt(1 - schedule(time))  # √(1 - ᾱₜ)
@@ -248,7 +250,7 @@ class TextSed(nn.Module):
         self.model = model
         self.use_self_cond = use_self_cond
         self.noise_schedule = noise_schedule
-        self.reader = layers.EmbeddingReader(embed_mat, embed_scale)
+        self.reader = EmbeddingReader(embed_mat, embed_scale)
 
     @torch.no_grad()
     def sample(
@@ -259,6 +261,7 @@ class TextSed(nn.Module):
         use_self_cond: Optional[bool] = True,
         step_fn: Optional[Callable] = ddim_step,
         # dtype: Optional[DType] = None
+        device: Optional[Device] = "cuda",
     ) -> NamedTensor:
         """p sampler
         Sampler for the reverse diffusion process (denoising).
@@ -267,22 +270,22 @@ class TextSed(nn.Module):
             time_delta: Asymmetric time interval shift, t → (t - Δ)
         """
         # Sample from the normal prior xₜ ~ qₜ
-        rand_embeds = torch.randn(shape)  
-        pred_embeds = torch.zeros_like(rand_embeds)
+        rand_embeds = torch.randn(shape, device=device)
+        pred_embeds = torch.zeros_like(rand_embeds, device=device)
 
         for step in range(num_steps):
             # Get time for current and next states
             # (NOTE: (1 - ...) to process in reverse)
-            time_now = torch.tensor([1 - step / num_steps])
+            time_now = torch.tensor([1 - step / num_steps], device=device)
             time_next = torch.tensor([
                 torch.maximum(
                     torch.tensor(1 - (step + 1 + time_delta) / num_steps),
                     torch.tensor(0.0)
-                )])
+                )], device=device)
 
             # Predict start embeds
             if not use_self_cond:
-                pred_embeds = torch.zeros_like(rand_embeds)
+                pred_embeds = torch.zeros_like(rand_embeds, device=device)
             pred_embeds = self.model(
                 torch.concat([rand_embeds, pred_embeds], -1),
                 time_now)
@@ -312,7 +315,7 @@ class TextSed(nn.Module):
         embeds = self.reader.embed(input)
 
         # Select random timesteps and corrupt
-        time = torch.rand((batch_size,))
+        time = torch.rand((batch_size,), device=embeds.device)
         noisy_embeds = corrupt(embeds, time, schedule=self.noise_schedule)
 
         # Compute self-conditioning estimate
@@ -334,7 +337,7 @@ class TextSed(nn.Module):
         loss_recon = cross_entropy_loss(logits, targets=input, z_loss=z_loss)
         loss = loss_mse + loss_recon
 
-        return loss, utils.flatten_dict(
+        return loss, flatten_dict(
             dict(
                 total_loss=loss,
                 loss_mse=loss_mse,

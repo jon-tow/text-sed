@@ -42,7 +42,7 @@ def text_dataloader(
     tokenizer: Any,
     per_gpu_batch_size: int,
     max_seq_len: int,
-    num_workers: Optional[int] = 0,
+    num_workers: Optional[int] = 1,
     use_infinite_sampler: bool = False,
 ):
     tokenized_dataset = dataset.map(

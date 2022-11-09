@@ -20,7 +20,7 @@ model:
 
 train:
   batch_size: 32
-  max_steps: 1e6
+  max_steps: 1000000  # 1e6
   resume: false
   eval_every: 1000
   log_every: 100
@@ -40,7 +40,7 @@ data:
   valid_name: test
   use_auth_token: False
   use_fast_tokenizer: True
-  num_preprocess_workers: 4
+  num_preprocess_workers: 1
 
 optimizer:
   type: adamw

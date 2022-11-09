@@ -84,6 +84,7 @@ def fixed_position_embedding(
 
 class FixedPositionEmbedding(nn.Module):
     def __init__(self, dim: int, max_period: Optional[int] = 10_000):
+        super().__init__()
         self.dim = dim
         self.max_period = max_period
 
@@ -97,7 +98,7 @@ class FixedPositionEmbedding(nn.Module):
             self.dim,
             num_pos=input.shape[seq_dim],
             max_period=self.max_period)
-        return torch.concat([sincos[0], sincos[1]], dim=-1)
+        return torch.concat([sincos[0], sincos[1]], dim=-1).to(input.device)
 
 
 # TODO: Add Kat's Fourier embedding: https://github.com/crowsonkb/k-diffusion/blob/f4e99857772fc3a126ba886aadf795a332774878/k_diffusion/layers.py#L219
@@ -118,7 +119,7 @@ class SinusoidalTimeEmbedding(nn.Module):
             self.dim // 2), (max_timescale / min_timescale)
         log_timescale = math.log(ratio_scale) / (num_timescale - 1.0)
         inv_timescale = min_timescale * torch.exp(
-            torch.arange(0, num_timescale) * -log_timescale)
+            torch.arange(0, num_timescale, device=time.device) * -log_timescale)
         timescale = time[:, None] * inv_timescale[None, :]
 
         return torch.concat([torch.sin(timescale), torch.cos(timescale)], -1)
@@ -148,7 +149,7 @@ def multihead_attn(
     k: Tensor,
     v: Tensor,
     scale: float,
-    bias: Tensor = torch.Tensor([0.0])
+    bias: Tensor = 0.0
 ) -> Tensor:
     """Scaled Dot-Product Attention ("Soft Look-Up Table")."""
     score = torch.einsum("... h s d, ... h S d -> ... h s S", q, k)
