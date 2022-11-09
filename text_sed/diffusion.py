@@ -270,7 +270,7 @@ class TextSed(nn.Module):
         use_self_cond: Optional[bool] = True,
         step_fn: Optional[Callable] = ddim_step,
         # dtype: Optional[DType] = None
-        device: Optional[Device] = "cuda",
+        device: Optional[Device] = "cuda:0",
     ) -> NamedTensor:
         """p sampler
         Sampler for the reverse diffusion process (denoising).

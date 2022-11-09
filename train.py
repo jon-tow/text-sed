@@ -6,13 +6,14 @@ import datasets
 import transformers
 import torch
 import torch.distributed as dist
+import tqdm
 import omegaconf as oc
 import wandb
 
-from tqdm import tqdm
 from typing import *
 
 from text_sed import diffusion, layers, slurm, utils
+
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,8 @@ def train(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     tokenizer: transformers.PreTrainedTokenizer,
-    step_state: int = 0,
+    step_state: Optional[int] = 0,
+    device: Optional[Union[torch.device, str]] = "cuda:0",
 ):
     # Initialize datasets
     text_datasets = {
@@ -63,11 +65,13 @@ def train(
     valid_iter = iter(dataloaders["valid"])
 
     model.train()
-    for step in tqdm(
-        range(step_state, config.train.max_steps), disable=not utils.is_main_process()
+    for step in tqdm.trange(
+        step_state, config.train.max_steps,
+        initial=step_state,
+        disable=not utils.is_main_process(),
     ):
         step += 1
-        inputs = next(train_iter)["input_ids"].cuda()
+        inputs = next(train_iter)["input_ids"].to(device)
 
         optimizer.zero_grad()
         loss, stats = model(inputs)
@@ -86,7 +90,7 @@ def train(
         # Evaluate and log the validation stats
         if step % config.train.eval_every == 0:
             model.eval()
-            valid_inputs = next(valid_iter)["input_ids"].cuda()
+            valid_inputs = next(valid_iter)["input_ids"].to(device)
             with torch.no_grad():
                 _, valid_stats = model(valid_inputs)
             wandb.log(valid_stats, step=step)
@@ -95,7 +99,7 @@ def train(
             if utils.is_main_process():
                 logger.info(f"Saving latest checkpoint")
                 checkpoint = {
-                    "model": inner_model.state_dict(),
+                    "model": model.module.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "step": step,
                     "config": config,
@@ -104,7 +108,8 @@ def train(
                 torch.save(checkpoint, path)
 
         # Generate samples
-        if step % config.train.sample_every == 0: # and step != 0:
+        is_sample_step = step % config.train.sample_every == 0 and step != 0
+        if is_sample_step and utils.is_main_process():
             model.eval()
             # TODO: Add if-statement to unwrap DDP model
             samples = model.module.sample(
@@ -113,15 +118,10 @@ def train(
                 time_delta=config.model.time_delta,
                 device=inputs.device,
             )
-            logger.info(f"Samples: {samples}")
+            samples = tokenizer.batch_decode(samples, skip_special_tokens=True)
             sample_log = "\nSamples:\n"
             for sample in samples:
-                if sample is None:
-                    sample_log += "None\n"
-                    continue
-                sample_log += (
-                    f"➜ {tokenizer.decode(sample, skip_special_tokens=True)}\n"
-                )
+                sample_log += f"➜ {sample}\n"
             logger.info(sample_log)
             model.train()
 
@@ -130,7 +130,7 @@ def train(
         if is_save_step and utils.is_main_process():
             logger.info(f"Saving checkpoint for step {step}")
             checkpoint = {
-                "model": inner_model.state_dict(),
+                "model": model.module.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "step": step,
                 "config": config,
@@ -220,20 +220,22 @@ if __name__ == "__main__":
         betas=tuple(config.optimizer.betas),
         eps=config.optimizer.eps,
     )
-    
+
     logger.info(f"Parameter count: ~{format(utils.param_count(model), ',')}")
 
     # Load checkpoints if resuming training
     if config.train.resume_path is not None:
+        logger.info(f"Loading checkpoint from {config.train.resume_path}")
         checkpoint = torch.load(config.train.resume_path)
-        model.load_state_dict(checkpoint["model"])
+        model.load_state_dict(checkpoint["model"], strict=True)
+        # Move model to GPU if available before loading optimizer state
+        if torch.cuda.is_available(): model.cuda()
         optimizer.load_state_dict(checkpoint["optimizer"])
         step_state = checkpoint["step"]
     else:
         step_state = 0
+        if torch.cuda.is_available(): model.cuda()
 
-    if torch.cuda.is_available():
-        model.cuda()
     if dist.is_initialized():
         model = torch.nn.parallel.DistributedDataParallel(
             model,
