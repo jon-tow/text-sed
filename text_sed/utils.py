@@ -17,6 +17,27 @@ def param_count(model: torch.nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def get_grouped_params(
+    model: torch.nn.Module,
+    weight_decay: float,
+    no_decay: List[str] = ["bias", "LayerNorm.weight"]
+):
+    """Removes weight decay from parameters with names containing any of the
+    strings in `no_decay`.
+    Reference: HuggingFace `transformers` library.
+    """
+    params_with_wd, params_without_wd = [], []
+    for n, p in model.named_parameters():
+        if any(nd in n for nd in no_decay):
+            params_without_wd.append(p)
+        else:
+            params_with_wd.append(p)
+    return [
+        {"params": params_with_wd, "weight_decay": weight_decay},
+        {"params": params_without_wd, "weight_decay": 0.0},
+    ]
+
+
 # Data utils
 
 

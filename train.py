@@ -214,7 +214,7 @@ if __name__ == "__main__":
         noise_schedule=diffusion.get_noise_schedule(config.model.noise_schedule),
     )
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        utils.get_grouped_params(model, config.optimizer.weight_decay),
         lr=config.optimizer.lr,
         weight_decay=config.optimizer.weight_decay,
         betas=tuple(config.optimizer.betas),
