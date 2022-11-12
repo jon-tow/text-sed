@@ -1,16 +1,30 @@
+import logging
 import os
 import sys
+from functools import partial
+from typing import *
 
 import datasets
-import logging
 import torch
 import torch.distributed as dist
 import transformers
-
-from functools import partial
-from typing import Any, List, Optional
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import BatchSampler, RandomSampler
+
+
+def get_dtype(
+    dtype: Union[str, torch.dtype],
+    config: Optional[transformers.AutoConfig] = None
+) -> torch.dtype:
+    """Converts `str` -> `torch.dtype` when possible."""
+    if dtype is None and config is not None:
+        _torch_dtype = config.torch_dtype
+    elif isinstance(dtype, str) and dtype != "auto":
+        # Convert `str` args torch dtype: `float16` -> `torch.float16`
+        _torch_dtype = getattr(torch, dtype)
+    else:
+        _torch_dtype = dtype
+    return _torch_dtype
 
 
 def param_count(model: torch.nn.Module) -> int:

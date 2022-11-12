@@ -27,6 +27,8 @@ train:
   sample_every: 1000
   num_samples: 8
   resume_path: null
+  use_amp: true
+  dtype: bfloat16
 
 valid:
   batch_size: 64

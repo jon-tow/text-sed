@@ -1,16 +1,17 @@
 import argparse
-import os
 import logging
+import os
+import random
+from typing import *
 
 import datasets
-import transformers
+import numpy as np
+import omegaconf as oc
 import torch
 import torch.distributed as dist
 import tqdm
-import omegaconf as oc
+import transformers
 import wandb
-
-from typing import *
 
 from text_sed import diffusion, layers, slurm, utils
 
@@ -22,6 +23,8 @@ def train(
     config: oc.DictConfig,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    lr_scheduler: torch.optim.lr_scheduler._LRScheduler,
+    scaler: torch.cuda.amp.GradScaler,
     tokenizer: transformers.PreTrainedTokenizer,
     step_state: Optional[int] = 0,
     device: Optional[Union[torch.device, str]] = "cuda:0",
@@ -66,41 +69,55 @@ def train(
 
     model.train()
     for step in tqdm.trange(
-        step_state, config.train.max_steps,
+        step_state,
+        config.train.max_steps,
         initial=step_state,
         disable=not utils.is_main_process(),
     ):
         step += 1
-        inputs = next(train_iter)["input_ids"].to(device)
 
-        optimizer.zero_grad()
-        loss, stats = model(inputs)
-        loss.backward()
+        # TODO: The `BatchSampler` + `DataLoader` prepends an extra dimension to
+        # the data. This is a hack to remove it.
+        inputs = next(train_iter)["input_ids"].to(device)[0]
+        with torch.amp.autocast(
+            device_type="cuda", dtype=utils.get_dtype(config.train.dtype)
+        ):
+            loss, stats = model(inputs)
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(
-            model.parameters(), config.optimizer.max_grad_norm
+            model.parameters(), max_norm=config.optimizer.max_grad_norm
         )
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
+        lr_scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
 
         # Log training stats
         if step % config.train.log_every == 0:
             wandb.log(stats, step=step)
-            info = f"Step: {step}/{config.train.max_steps} | Loss: {loss:.5f}"
+            info = f"🚶 Step: {step}/{config.train.max_steps} "
+            info += f"| Loss: {loss:.5f} | LR: {lr_scheduler.get_last_lr()[0]:.6f}"
             logger.info(info)
 
         # Evaluate and log the validation stats
         if step % config.train.eval_every == 0:
             model.eval()
-            valid_inputs = next(valid_iter)["input_ids"].to(device)
+            # TODO: The `BatchSampler` + `DataLoader` prepends an extra dimension to
+            # the data. This is a hack to remove it.
+            valid_inputs = next(valid_iter)["input_ids"].to(device)[0]
             with torch.no_grad():
                 _, valid_stats = model(valid_inputs)
             wandb.log(valid_stats, step=step)
             model.train()
             # Save latest checkpoint
             if utils.is_main_process():
-                logger.info(f"Saving latest checkpoint")
+                logger.info(f"💾 Saving latest checkpoint")
                 checkpoint = {
                     "model": model.module.state_dict(),
                     "optimizer": optimizer.state_dict(),
+                    "lr_scheduler": lr_scheduler.state_dict(),
+                    "scaler": scaler.state_dict(),
                     "step": step,
                     "config": config,
                 }
@@ -119,7 +136,7 @@ def train(
                 device=inputs.device,
             )
             samples = tokenizer.batch_decode(samples, skip_special_tokens=True)
-            sample_log = "\nSamples:\n"
+            sample_log = "💬 Generating samples:\n"
             for sample in samples:
                 sample_log += f"➜ {sample}\n"
             logger.info(sample_log)
@@ -128,10 +145,12 @@ def train(
         # Save checkpoints
         is_save_step = step % config.train.save_every == 0 and step != 0
         if is_save_step and utils.is_main_process():
-            logger.info(f"Saving checkpoint for step {step}")
+            logger.info(f"💾 Saving checkpoint for step {step}")
             checkpoint = {
                 "model": model.module.state_dict(),
                 "optimizer": optimizer.state_dict(),
+                "lr_scheduler": lr_scheduler.state_dict(),
+                "scaler": scaler.state_dict(),
                 "step": step,
                 "config": config,
             }
@@ -181,14 +200,15 @@ if __name__ == "__main__":
         )
 
     # Seed RNGs for ~reproducibility
-    if config.seed is not None:
-        seeds = torch.randint(
-            -(2**63),
-            2**63 - 1,
-            [dist.get_world_size() if dist.is_initialized() else 1],
-            generator=torch.Generator().manual_seed(config.seed),
-        )
-        torch.manual_seed(seeds[utils.get_rank()])
+    seeds = torch.randint(
+        -(2**63),
+        2**63 - 1,
+        [dist.get_world_size() if dist.is_initialized() else 1],
+        generator=torch.Generator().manual_seed(config.seed),
+    )
+    torch.manual_seed(seeds[utils.get_rank()])
+    random.seed(config.seed)
+    np.random.seed(config.seed)
 
     # Initialize tokenizer - turn off HuggingFace parallelism warnings
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -220,29 +240,40 @@ if __name__ == "__main__":
         betas=tuple(config.optimizer.betas),
         eps=config.optimizer.eps,
     )
+    lr_scheduler = transformers.get_scheduler(
+        name=config.optimizer.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=config.optimizer.warmup_steps,
+        num_training_steps=config.train.max_steps,
+    )
+    scaler = torch.cuda.amp.GradScaler(enabled=config.train.use_amp)
 
     logger.info(f"Parameter count: ~{format(utils.param_count(model), ',')}")
 
     # Load checkpoints if resuming training
     if config.train.resume_path is not None:
-        logger.info(f"Loading checkpoint from {config.train.resume_path}")
+        logger.info(f"⛽️ Loading checkpoint from {config.train.resume_path}")
         checkpoint = torch.load(config.train.resume_path)
         model.load_state_dict(checkpoint["model"], strict=True)
         # Move model to GPU if available before loading optimizer state
-        if torch.cuda.is_available(): model.cuda()
+        if torch.cuda.is_available():
+            model.cuda()
         optimizer.load_state_dict(checkpoint["optimizer"])
+        lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+        scaler.load_state_dict(checkpoint["scaler"])
         step_state = checkpoint["step"]
     else:
         step_state = 0
-        if torch.cuda.is_available(): model.cuda()
+        if torch.cuda.is_available():
+            model.cuda()
 
     if dist.is_initialized():
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
-            find_unused_parameters=False,
+            find_unused_parameters=True,
         )
         dist.barrier()
 
-    train(config, model, optimizer, tokenizer, step_state)
+    train(config, model, optimizer, lr_scheduler, scaler, tokenizer, step_state)
