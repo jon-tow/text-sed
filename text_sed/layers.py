@@ -9,6 +9,7 @@ from einops import rearrange
 from functools import partial
 
 from typing import NewType, Literal, Optional, Tuple
+
 DType = NewType("DType", torch.dtype)
 Shape = NewType("Shape", Tuple[int, ...])
 Tensor = NewType("Tensor", torch.Tensor)
@@ -20,7 +21,7 @@ Generator = NewType("Generator", torch.Generator)
 
 
 def auto_extract_embed_mat(
-    model_name: str = "bert-base-uncased"
+    model_name: str = "bert-base-uncased",
 ) -> Tuple[NamedTensor["vocab", "embed"], int]:
     """Extracts a pre-trained word embedding lookup matrix, E ϵ Rᴰˣⱽ, from the
     specified model.
@@ -77,8 +78,8 @@ def fixed_position_embedding(
     num_pos: int,
     max_period: Optional[int] = 10_000,
 ) -> Tuple[NamedTensor["...", "pos", "dim"]]:
-    inv_freq = 1. / (max_period ** (torch.arange(0, dim, 2) / dim))
-    sinusoid = torch.einsum('i , j -> i j', torch.arange(num_pos), inv_freq)
+    inv_freq = 1.0 / (max_period ** (torch.arange(0, dim, 2) / dim))
+    sinusoid = torch.einsum("i , j -> i j", torch.arange(num_pos), inv_freq)
     return torch.sin(sinusoid), torch.cos(sinusoid)
 
 
@@ -97,7 +98,8 @@ class FixedPositionEmbedding(nn.Module):
         sincos = fixed_position_embedding(
             self.dim,
             num_pos=input.shape[seq_dim],
-            max_period=self.max_period)
+            max_period=self.max_period,
+        )
         return torch.concat([sincos[0], sincos[1]], dim=-1).to(input.device)
 
 
@@ -110,34 +112,29 @@ class SinusoidalTimeEmbedding(nn.Module):
         self.dim = dim
         self.max_period = max_period
 
-    def forward(
-        self, time: NamedTensor["batch"]
-    ) -> NamedTensor["batch dim"]:
+    def forward(self, time: NamedTensor["batch"]) -> NamedTensor["batch dim"]:
         # Reference: https://github.com/magenta/music-spectrogram-diffusion
-        min_timescale, max_timescale = 1., self.max_period
-        num_timescale, ratio_scale = (
-            self.dim // 2), (max_timescale / min_timescale)
+        min_timescale, max_timescale = 1.0, self.max_period
+        num_timescale, ratio_scale = (self.dim // 2), (max_timescale / min_timescale)
         log_timescale = math.log(ratio_scale) / (num_timescale - 1.0)
         inv_timescale = min_timescale * torch.exp(
-            torch.arange(0, num_timescale, device=time.device) * -log_timescale)
+            torch.arange(0, num_timescale, device=time.device) * -log_timescale
+        )
         timescale = time[:, None] * inv_timescale[None, :]
-
         return torch.concat([torch.sin(timescale), torch.cos(timescale)], -1)
 
 
 class TimeEmbedding(nn.Module):
     def __init__(self, embed_dim: int, time_dim: Optional[int] = None):
         super().__init__()
-        time_dim = time_dim if time_dim else 4 * embed_dim
         self.embed = nn.Sequential(
             SinusoidalTimeEmbedding(embed_dim),
             nn.Linear(embed_dim, time_dim),
             nn.GELU(),
             nn.Linear(time_dim, embed_dim),
-            nn.GELU(),
         )
 
-    def forward(self, time: NamedTensor["batch"]) -> NamedTensor["batch", "time_dim"]:
+    def forward(self, time: NamedTensor["batch"]) -> NamedTensor["batch", "embed_dim"]:
         return self.embed(time)
 
 
@@ -149,7 +146,7 @@ def multihead_attn(
     k: Tensor,
     v: Tensor,
     scale: float,
-    bias: Tensor = 0.0
+    bias: Optional[Tensor] = 0.0,
 ) -> Tensor:
     """Scaled Dot-Product Attention ("Soft Look-Up Table")."""
     score = torch.einsum("... h s d, ... h S d -> ... h s S", q, k)
@@ -177,6 +174,30 @@ def merge_heads(x: Tensor) -> Tensor:
 # Transformer
 
 
+class TimeAdaptiveLayerNorm(nn.Module):
+    """Time Adaptive Layer Normalization.
+    Reference: https://github.com/huggingface/diffusers/blob/045157a46fb16a21a5f37a5f3f3ad710895b680b/src/diffusers/models/attention.py#L649
+        - No idea where they came up with it?
+    """
+    def __init__(self, model_dim):
+        super().__init__()
+        self.norm = nn.LayerNorm(model_dim, elementwise_affine=False)
+        self.time_proj = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(model_dim, 2 * model_dim),
+        )
+
+    def forward(
+        self,
+        inputs: NamedTensor["batch", "pos", "dim"],
+        time_embeds: NamedTensor["batch"],
+    ) -> NamedTensor["batch", "pos", "dim"]:
+        time_embeds = self.time_proj(time_embeds)  # [..., 2 * dim]
+        # FiLM-style conditioning
+        time_scale, time_bias = torch.chunk(time_embeds, chunks=2, dim=-1)
+        return self.norm(inputs) * (1 + time_scale) + time_bias
+
+
 class ParallelEncoderBlock(nn.Module):
     def __init__(
         self,
@@ -186,10 +207,8 @@ class ParallelEncoderBlock(nn.Module):
         ff_mult: int = 4,  # Inner ff upscale factor (d_ff * 4)
     ):
         super().__init__()
-
         self.norm = nn.LayerNorm(model_dim)
-        # Scaled dot-product attention factor: 1 / √dₖ
-        self.scale = math.sqrt(head_dim) ** -1.0
+        self.scale = math.sqrt(head_dim) ** -1.0  # Scaled dot-product attention factor: 1 / √dₖ
         self.num_heads = num_heads
 
         # Fused input projection: ((Wᵢq, Wᵢᵏ, Wᵢᵛ), (W1, W2))
@@ -200,29 +219,29 @@ class ParallelEncoderBlock(nn.Module):
         self.proj_in = nn.Linear(model_dim, sum(self.fused_dims), bias=False)
 
         # Output projections
-        self.attn_proj = nn.Linear(num_heads * head_dim, model_dim, bias=False)
-        self.ff_proj = nn.Linear(ff_mult * model_dim, model_dim, bias=False)
+        self.attn_proj = nn.Linear(num_heads * head_dim, model_dim)
+        self.ff_proj = nn.Linear(ff_mult * model_dim, model_dim)
 
     def forward(
         self,
         inputs: NamedTensor["...", "pos", "dim"],
     ) -> Tensor:
-        # Pre-Norm: [..., seq, dim]
+        # Pre-Norm: [..., pos, dim]
         units = self.norm(inputs)
 
-        # Input Projects: [..., seq, *fused_dims]
+        # Input Projects: [..., pos, *fused_dims]
         proj_units = self.proj_in(units)
         q, k, v, ff, ff_gate = split_fused_proj(proj_units, self.fused_dims)
 
         # Attention
-        # [..., num_heads, seq, head_dim]
+        # [..., num_heads, pos, head_dim]
         q, k, v = map(partial(split_heads, num_heads=self.num_heads), (q, k, v))
         attn = multihead_attn(q, k, v, scale=self.scale)
-        concat = merge_heads(attn)  # [..., seq, (num_heads * head_dim)]
+        concat = merge_heads(attn)  # [..., pos, (num_heads * head_dim)]
 
-        # Output projection: [..., seq, model]
+        # Output projection: [..., pos, model]
         attn_out = self.attn_proj(concat)
-        ff_out = self.ff_proj(ff * F.gelu(ff_gate, approximate='tanh'))
+        ff_out = self.ff_proj(ff * F.gelu(ff_gate, approximate="tanh"))
         return inputs + attn_out + ff_out
 
 
@@ -231,34 +250,41 @@ class TransformerEncoder(nn.Module):
         self,
         embed_dim: int,
         model_dim: int,
-        time_dim: int,
         *,
+        dropout: Optional[float] = 0.1,
+        time_dim: Optional[int] = None,
         head_dim: Optional[int] = 64,
         num_heads: Optional[int] = 16,
         num_layers: Optional[int] = 12,
         ff_mult: Optional[int] = 4,
-        use_self_cond: bool = True,
+        use_self_cond: Optional[bool] = True,
     ):
         super().__init__()
 
-        time_channels = 4 * model_dim
+        time_dim = time_dim if time_dim else 4 * model_dim 
         self.time_embed = TimeEmbedding(model_dim, time_dim)
         self.pos_embed = FixedPositionEmbedding(model_dim)
+        self.drop = nn.Dropout(dropout)
 
-        # 2x b/c of concat noise & estimates
+        # 2x b/c of self-conditioning concat of noise & estimates
         in_embed_dim = 2 * embed_dim if use_self_cond else embed_dim
         self.in_proj = nn.Linear(in_embed_dim, model_dim)
-        self.out_proj = nn.Linear(model_dim, embed_dim)  # E'
+        self.out_proj = nn.Sequential(
+            nn.LayerNorm(model_dim),
+            nn.Linear(model_dim, embed_dim),
+        )  # E'
 
-        layers = []
+        blocks = []
         for _ in range(num_layers):
-            layers.append(ParallelEncoderBlock(
-                model_dim,
-                head_dim,
-                num_heads,
-                ff_mult=ff_mult,
-            ))
-        self.layers = nn.ModuleList(layers)
+            blocks.append(
+                ParallelEncoderBlock(
+                    model_dim,
+                    head_dim,
+                    num_heads,
+                    ff_mult=ff_mult,
+                )
+            )
+        self.blocks = nn.ModuleList(blocks)
 
     def forward(
         self,
@@ -267,6 +293,8 @@ class TransformerEncoder(nn.Module):
     ) -> NamedTensor["batch", "pos", "embed"]:
         time_embed = rearrange(self.time_embed(time), "... d -> ... 1 d")
         hidden = self.in_proj(inputs) + self.pos_embed(inputs) + time_embed
-        for layer in self.layers:
-            hidden = layer(hidden)
-        return self.out_proj(hidden)
+        hidden = self.drop(hidden)
+        for block in self.blocks:
+            hidden = block(hidden)
+        logits = self.out_proj(hidden)
+        return logits

@@ -131,10 +131,9 @@ def ddpm_step(
     References:
     - Ho et al. "Denoising Diffusion Probabilistic Models". 2020.
         https://arxiv.org/abs/2006.11239
-        
     """
     xₜ, x̃ₒ = noisy_inputs, pred_inputs
-    γₜ = schedule(time_now) 
+    γₜ = schedule(time_now)
     ᾱₜ = γₜ / schedule(time_next)
     σₜ = torch.sqrt(1 - ᾱₜ)
     z = torch.randn_like(σₜ)

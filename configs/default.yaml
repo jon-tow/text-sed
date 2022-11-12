@@ -17,7 +17,8 @@ model:
   noise_schedule: cosine
   use_self_cond: true
   time_delta: 0.0
-  sampler: ddpm
+  sampler: ddim
+  dropout: 0.1
 
 optimizer:
   type: adamw
@@ -53,16 +54,6 @@ data:
   use_auth_token: False
   use_fast_tokenizer: True
   num_preprocess_workers: 1
-
-optimizer:
-  type: adamw
-  lr: 3e-4
-  lr_scheduler: linear
-  warmup_steps: 5000
-  weight_decay: 0.01
-  eps: 1e-08
-  betas: [0.9, 0.999]
-  max_grad_norm: 1.0
 
 logging:
   use_wandb: true

@@ -95,7 +95,7 @@ def train(
 
         # Log training stats
         if step % config.train.log_every == 0:
-            wandb.log(stats, step=step)
+            wandb.log({f"train/{k}": v for k, v in stats.items()}, step=step)
             info = f"🚶 Step: {step}/{config.train.max_steps} "
             info += f"| Loss: {loss:.5f} | LR: {lr_scheduler.get_last_lr()[0]:.6f}"
             logger.info(info)
@@ -108,7 +108,7 @@ def train(
             valid_inputs = next(valid_iter)["input_ids"].to(device)[0]
             with torch.no_grad():
                 _, valid_stats = model(valid_inputs)
-            wandb.log(valid_stats, step=step)
+            wandb.log({f"valid/{k}": v for k, v in valid_stats.items()}, step=step)
             model.train()
             # Save latest checkpoint
             if utils.is_main_process():
@@ -229,6 +229,7 @@ if __name__ == "__main__":
         head_dim=config.model.head_dim,
         num_heads=config.model.num_heads,
         use_self_cond=config.model.use_self_cond,
+        dropout=config.model.dropout,
     )
     model = diffusion.TextSed(
         model=inner_model,
@@ -250,7 +251,7 @@ if __name__ == "__main__":
     )
     scaler = torch.cuda.amp.GradScaler(enabled=config.train.use_amp)
 
-    logger.info(f"Parameter count: ~{format(utils.param_count(model), ',')}")
+    logger.info(f"Parameter count: ~{format(utils.param_count(inner_model), ',')}")
 
     # Load checkpoints if resuming training
     if config.train.resume_path is not None:
