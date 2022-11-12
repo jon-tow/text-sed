@@ -27,8 +27,6 @@ def get_noise_schedule(schedule_name: str, **kwargs) -> Callable:
     """Returns ᾱ schedules"""
     if schedule_name == "cosine":
         return cosine_alpha_bar_schedule(**kwargs)
-    elif schedule_name == "sqrt":
-        return sqrt_alpha_bar_schedule(**kwargs)
     elif schedule_name == "linear":
         return linear_schedule(**kwargs)
     raise ValueError(f"Schedule `{schedule_name}` is not available.")
@@ -120,37 +118,6 @@ def cosine_alpha_bar_schedule(
 
     def scheduler(num_steps: float):
         return cosine_alpha_bar(time=num_steps, offset=offset)
-
-    return scheduler
-
-
-def sqrt_alpha_bar(
-    time: float,
-    # max_t: int,  # TODO: Use if time is NOT in [0, 1)
-    offset: Optional[float] = 1e-4,
-) -> Tensor:
-    """Square-root noise schedule - useful for language modeling.
-
-    Reference:
-    - Li et al. "Diffusion-LM Improves Controllable Text Generation". 2022.
-        https://arxiv.org/pdf/2205.14217.pdf#page=15
-
-    TODO: This leads to NaNs
-
-    Args:
-        time: Continous time-step in [0, 1)
-        offset: Start noise level.
-    """
-    # Normalize if your input is not in [0, 1)
-    # return 1.0 - torch.sqrt((time / max_t) + offset)
-    return 1.0 - torch.sqrt(time + offset)
-
-
-def sqrt_alpha_bar_schedule(
-    offset: Optional[float] = 1e-4,
-) -> Callable:
-    def scheduler(num_steps: float):
-        return sqrt_alpha_bar(time=num_steps, offset=offset)
 
     return scheduler
 
