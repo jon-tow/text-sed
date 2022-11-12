@@ -1,15 +1,15 @@
+import functools
+from typing import Callable, Literal, NewType, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import reduce
 
 from .layers import EmbeddingReader
 from .utils import flatten_dict
 
-from einops import reduce
-
 # Torch Type Hints
-from typing import Callable, NewType, Literal, Optional, Tuple
-
 Device = NewType("Device", torch.device)
 DType = NewType("DType", torch.dtype)
 Shape = NewType("Shape", Tuple[int, ...])
@@ -41,51 +41,6 @@ def linear_schedule(start: float, end: float) -> Tensor:
     return scheduler
 
 
-def betas_for_alpha_bar(
-    alpha_bar: Callable[[float], Tensor],
-    max_beta: Optional[float] = 0.999,
-) -> Tensor:
-    """Create a β schedule that discretizes the given ᾱ function,
-    ᾱ[t] = Πᵗα[i] where α[i] = (1 - β[i]) from time t = [0, 1].
-
-    Args:
-        num_steps: The number of betas to create.
-        alpha_bar: Callable that takes a timestep argument from
-            [0, 1] and produces the cumulative prod of (1 - β)
-        max_beta: The max β to use.
-    """
-
-    def scheduler(num_steps: int):
-        betas = []
-        for i in range(num_steps):
-            a1 = alpha_bar(i / num_steps)
-            a2 = alpha_bar((i + 1) / num_steps)
-            betas.append(min(1 - a2 / a1, max_beta))
-        return torch.Tensor(betas)
-
-    return scheduler
-
-
-def cosine_beta_schedule(
-    offset: Optional[float] = 0.0002,
-    max_beta: Optional[float] = 0.999,
-) -> Tensor:
-    """Cosine noise-variance (β) scheduler
-
-    Reference: Nichol & Dhariwal, "Improved Denoising Diffusion Probabilistic Models".
-        2021. https://arxiv.org/pdf/2102.09672.pdf
-
-    Args:
-        offset: Small offset to prevent βₜ from beeing too small near
-            t = 0.
-    """
-
-    def scheduler(num_steps: int):
-        return torch.cos(((num_steps + offset) / (1 + offset)) * (torch.pi / 2)) ** 2
-
-    return betas_for_alpha_bar(scheduler, max_beta)
-
-
 def cosine_alpha_bar(
     time: float,
     offset: Optional[float] = 0.0002,
@@ -100,7 +55,7 @@ def cosine_alpha_bar(
         offset: Small offset to prevent βₜ from beeing too small near
             t = 0.
     """
-    return torch.cos(((time + offset) / (1 + offset)) * (torch.pi / 2)) ** 2
+    return torch.cos(((time + offset) / (1 + offset)) * torch.pi / 2) ** 2
 
 
 def cosine_alpha_bar_schedule(
@@ -122,6 +77,73 @@ def cosine_alpha_bar_schedule(
     return scheduler
 
 
+# Samplers
+
+
+def get_sampler(sampler_name: str, **kwargs) -> Callable:
+    """Returns sampler step function"""
+    if sampler_name == "ddim":
+        return functools.partial(ddim_step, **kwargs)
+    elif sampler_name == "ddpm":
+        return functools.partial(ddpm_step, **kwargs)
+    else:
+        raise ValueError(f"Sampler `{sampler_name}` is not available.")
+
+
+def ddim_step(
+    noisy_inputs: Tensor, # xₜ
+    pred_inputs: Tensor,  # x̃₀
+    time_now: Tensor,     # t
+    time_next: Tensor,    # t - 1
+    schedule: Callable,
+    # scale: Optional[float] = 1.0,
+) -> Tensor:              # xₜ₋₁
+    """Denoising diffusion implicit model step with η = 0. Estimates x₀ at
+    time_next with the DDIM updating rule.
+
+    References:
+    - Song et al. "Denoising Diffusion Implicit Models". 2020.
+        https://arxiv.org/pdf/2010.02502.pdf
+    - Lilian Weng.
+        https://lilianweng.github.io/posts/2021-07-11-diffusion-models/#speed-up-diffusion-model-sampling
+    """
+    # TODO: Remove unicode characters after coming up with good var names.
+    xₜ, x̃ₒ = noisy_inputs, pred_inputs
+    # x̃ₒ = torch.clip(x̃ₒ, -scale, scale)
+    ᾱₜ, ᾱₙ = schedule(time_now), schedule(time_next)  # ᾱₙ = ᾱₜ₋₁
+    ϵ = (xₜ - torch.sqrt(ᾱₜ) * x̃ₒ) * torch.rsqrt(1 - ᾱₜ)
+    # Next estimate (xₙ := xₜ₋₁)
+    xₙ = torch.sqrt(ᾱₙ) * x̃ₒ + torch.sqrt(1 - ᾱₙ) * ϵ
+    return xₙ
+
+
+def ddpm_step(
+    noisy_inputs: Tensor, # xₜ
+    pred_inputs: Tensor,  # x̃₀
+    time_now: Tensor,     # t
+    time_next: Tensor,    # t - 1
+    schedule: Callable,
+    # scale: Optional[float] = 1.0,
+) -> Tensor:              # xₜ₋₁
+    """Denoising diffusion implicit model step with η = 1. Estimates x₀ at
+    time_next with the DDPM updating rule.
+
+    References:
+    - Ho et al. "Denoising Diffusion Probabilistic Models". 2020.
+        https://arxiv.org/abs/2006.11239
+        
+    """
+    xₜ, x̃ₒ = noisy_inputs, pred_inputs
+    γₜ = schedule(time_now) 
+    ᾱₜ = γₜ / schedule(time_next)
+    σₜ = torch.sqrt(1 - ᾱₜ)
+    z = torch.randn_like(σₜ)
+    # x̃ₒ = torch.clip(x̃ₒ, -scale, scale)
+    ϵ = (xₜ - torch.sqrt(γₜ) * x̃ₒ) * torch.rsqrt(1 - γₜ)
+    xₙ = torch.rsqrt(ᾱₜ) * (xₜ - ((1 -  ᾱₜ) * torch.rsqrt(1 - γₜ)) * ϵ) + σₜ * z
+    return xₙ
+
+
 # Diffusion
 
 
@@ -138,11 +160,11 @@ def corrupt(
     """q sampler: q(xₜ | xₒ) ~ N(xₒ * √ᾱₜ, (1 - ᾱₜ)I)
     Arbitrary time q-sampler for forward diffusion processing (corruption).
 
-    Reference:
-    - "Denoising Diffusion Probabilistic Models" (Ho et al., 2020)
+    Reference
+    - Ho et al. "Denoising Diffusion Probabilistic Models". 2020.
         https://arxiv.org/abs/2006.11239
     """
-    noise = torch.randn(inputs.shape, device=inputs.device)  # ϵ
+    noise = torch.randn_like(inputs)  # ϵ
 
     signal_rate = torch.sqrt(schedule(time))  # √ᾱₜ
     noise_rate = torch.sqrt(1 - schedule(time))  # √(1 - ᾱₜ)
@@ -150,33 +172,6 @@ def corrupt(
     signal_rate = left_broadcast_to(signal_rate, inputs.shape)
     noise_rate = left_broadcast_to(noise_rate, inputs.shape)
     return signal_rate * inputs + noise_rate * noise
-
-
-def ddim_step(
-    noisy_inputs: Tensor, # xₜ
-    pred_inputs: Tensor,  # x̃₀
-    time_now: Tensor,     # t
-    time_next: Tensor,    # t - 1
-    schedule: Callable,
-    # scale: Optional[float] = 1.0,
-) -> Tensor:              # xₜ₋₁
-    """Denoising diffusion implicit model step with η = 0. Estimates x₀ at
-    time_next with the DDIM updating rule.
-
-    References:
-    - Song et al. "Denoising Diffusion Implicit Models" 2020.
-        https://arxiv.org/pdf/2010.02502.pdf
-    - Lilian Weng.
-        https://lilianweng.github.io/posts/2021-07-11-diffusion-models/#speed-up-diffusion-model-sampling
-    """
-    # TODO: Remove unicode characters after coming up with good var names.
-    xₜ, x̃ₒ = noisy_inputs, pred_inputs
-    # x̃ₒ = torch.clip(x̃ₒ, -scale, scale)
-    ᾱₜ, ᾱₙ = schedule(time_now), schedule(time_next)  # ᾱₙ = ᾱₜ₋₁
-    ϵ = (xₜ - torch.sqrt(ᾱₜ) * x̃ₒ) * torch.rsqrt(1 - ᾱₜ)
-    # Next estimate (xₙ := xₜ₋₁)
-    xₙ = torch.sqrt(ᾱₙ) * x̃ₒ + torch.sqrt(1 - ᾱₙ) * ϵ
-    return xₙ
 
 
 def cross_entropy_loss(
@@ -233,10 +228,10 @@ class TextSed(nn.Module):
         self,
         shape: Shape,
         num_steps: int,
-        time_delta: Optional[float] = 0.0,
+        *,
+        sampler: Optional[Callable] = ddim_step,
         use_self_cond: Optional[bool] = True,
-        step_fn: Optional[Callable] = ddim_step,
-        # dtype: Optional[DType] = None
+        time_delta: Optional[float] = 0.0,
         device: Optional[Device] = "cuda:0",
     ) -> NamedTensor:
         """p sampler
@@ -247,7 +242,7 @@ class TextSed(nn.Module):
         """
         # Sample from the normal prior xₜ ~ qₜ
         rand_embeds = torch.randn(shape, device=device)
-        pred_embeds = torch.zeros_like(rand_embeds, device=device)
+        pred_embeds = torch.zeros_like(rand_embeds)
 
         for step in range(num_steps):
             # Get time for current and next states
@@ -263,14 +258,14 @@ class TextSed(nn.Module):
 
             # Predict start embeds
             if not use_self_cond:
-                pred_embeds = torch.zeros_like(rand_embeds, device=device)
+                pred_embeds = torch.zeros_like(rand_embeds)
             pred_embeds = self.model(
                 torch.concat([rand_embeds, pred_embeds], -1),
                 time=time_now,
             )
 
             # Estimate embeds at time_next
-            rand_embeds = step_fn(
+            rand_embeds = sampler(
                 rand_embeds,
                 pred_embeds,
                 time_now,
@@ -300,12 +295,12 @@ class TextSed(nn.Module):
 
         # Compute self-conditioning estimate
         cond_embeds = torch.zeros_like(noisy_embeds, dtype=noisy_embeds.dtype)
-        with torch.no_grad():
-            if use_self_cond and torch.rand((1,)).item() > 0.5:
+        if use_self_cond and torch.rand((1,)).item() > 0.5:
+            with torch.no_grad():
                 cond_embeds = self.model(
                     torch.concat([noisy_embeds, cond_embeds], -1),
                     time=time
-                )
+                ).detach()
 
         # Predict embeddings
         pred_embeds = self.model(torch.concat([noisy_embeds, cond_embeds], -1), time)
@@ -318,8 +313,8 @@ class TextSed(nn.Module):
 
         return loss, flatten_dict(
             dict(
-                total_loss=loss,
-                loss_mse=loss_mse,
-                loss_recon=loss_recon,
+                total_loss=loss.item(),
+                loss_mse=loss_mse.item(),
+                loss_recon=loss_recon.item(),
             )
         )

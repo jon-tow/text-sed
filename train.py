@@ -132,6 +132,8 @@ def train(
             samples = model.module.sample(
                 shape=(config.train.num_samples, config.model.max_gen_len, embed_dim),
                 num_steps=config.model.num_gen_steps,
+                sampler=diffusion.get_sampler(config.model.sampler),
+                use_self_cond=config.model.use_self_cond,
                 time_delta=config.model.time_delta,
                 device=inputs.device,
             )
