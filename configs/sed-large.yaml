@@ -36,7 +36,7 @@ train:
   save_every: 10000
   sample_every: 1000
   num_samples: 8
-  resume_path: null
+  checkpoint_path: null
   use_amp: true
   dtype: bfloat16
 
