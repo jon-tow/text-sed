@@ -100,4 +100,4 @@ if __name__ == "__main__":
 
     shape = (args.num_samples, config.data.max_seq_len, embed_dim)
     logger.info("🏁 Starting generation...") 
-    generate(config, diff, tokenizer, num_samples=args.num_samples, device=args.device)
+    generate(config, diff, shape, tokenizer, device=args.device)
