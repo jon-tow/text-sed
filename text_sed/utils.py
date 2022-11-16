@@ -11,6 +11,9 @@ import transformers
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import BatchSampler, RandomSampler
 
+Shape = NewType("Shape", Tuple[int, ...])
+Tensor = NewType("Tensor", torch.Tensor)
+
 
 def get_dtype(
     dtype: Union[str, torch.dtype],
@@ -125,6 +128,16 @@ def flatten_dict(d: dict, parent_key: Optional[str] = "") -> dict:
         else:
             flat_d[f"{parent_key}{k}"] = v.item() if isinstance(v, torch.Tensor) else v
     return flat_d
+
+
+def append_dims(x: Tensor, target_dims: int) -> Tensor:
+    """Appends dimensions to the end of a tensor until it has target_dims dimensions.
+    Reference: @crowsonkb's `append_dims`.
+    """
+    dims_to_append = target_dims - x.ndim
+    if dims_to_append < 0:
+        raise ValueError(f'input has {x.ndim} dims but target_dims is {target_dims}, which is less')
+    return x[(...,) + (None,) * dims_to_append]
 
 
 # Distributed utils

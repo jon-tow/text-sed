@@ -30,6 +30,7 @@ def train(
     device: Optional[Union[torch.device, str]] = "cuda:0",
 ):
     # Initialize datasets
+    logger.info("📦 Loading dataset...") 
     text_datasets = {
         "train": datasets.load_dataset(
             config.data.name,
@@ -45,6 +46,7 @@ def train(
         ),
     }
 
+    logger.info("📦 Loading dataloaders...") 
     # Initialize data loaders
     dataloaders = {
         "train": utils.text_dataloader(
@@ -96,7 +98,7 @@ def train(
         # Log training stats
         if step % config.train.log_every == 0:
             wandb.log({f"train/{k}": v for k, v in stats.items()}, step=step)
-            info = f"🚶 Step: {step}/{config.train.max_steps} "
+            info = f"🎛 Step: {step}/{config.train.max_steps} "
             info += f"| Loss: {loss:.5f} | LR: {lr_scheduler.get_last_lr()[0]:.6f}"
             logger.info(info)
 
@@ -130,10 +132,10 @@ def train(
             model.eval()
             # TODO: Add if-statement to unwrap DDP model
             samples = model.module.sample(
-                shape=(config.train.num_samples, config.model.max_gen_len, embed_dim),
+                shape=(config.train.num_samples, config.model.max_gen_len, config.model.word_embed_dim),
                 num_steps=config.model.num_gen_steps,
                 sampler=diffusion.get_sampler(config.model.sampler),
-                use_self_cond=config.model.use_self_cond,
+                # use_self_cond=config.model.use_self_cond,
                 time_delta=config.model.time_delta,
                 device=inputs.device,
             )
@@ -185,7 +187,7 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
 
-    logger.info(f"Device Count: {dist.get_world_size()}")
+    logger.info(f"🖥 Device Count: {dist.get_world_size()}")
 
     # Set up logging
     utils.init_logger(logger, config.output_dir)
@@ -213,6 +215,7 @@ if __name__ == "__main__":
     np.random.seed(config.seed)
 
     # Initialize tokenizer - turn off HuggingFace parallelism warnings
+    logger.info("⏳ Loading tokenizer...")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         config.model.embed_model_name,
@@ -223,21 +226,21 @@ if __name__ == "__main__":
     # Initialize model and optimizer
     embed_mat, embed_dim = layers.auto_extract_embed_mat(config.model.embed_model_name)
     inner_model = layers.TransformerEncoder(
-        embed_dim=embed_dim,
-        time_dim=embed_dim,
+        word_embed_dim=config.model.word_embed_dim,
         model_dim=config.model.model_dim,
         head_dim=config.model.head_dim,
         num_heads=config.model.num_heads,
         use_self_cond=config.model.use_self_cond,
         dropout=config.model.dropout,
     )
-    model = diffusion.TextSed(
+    diff = diffusion.TextSed(
         model=inner_model,
+        word_embed_dim=config.model.word_embed_dim,
         embed_mat=embed_mat,
         noise_schedule=diffusion.get_noise_schedule(config.model.noise_schedule),
     )
     optimizer = torch.optim.AdamW(
-        utils.get_grouped_params(model, config.optimizer.weight_decay),
+        utils.get_grouped_params(diff, config.optimizer.weight_decay),
         lr=config.optimizer.lr,
         weight_decay=config.optimizer.weight_decay,
         betas=tuple(config.optimizer.betas),
@@ -251,16 +254,16 @@ if __name__ == "__main__":
     )
     scaler = torch.cuda.amp.GradScaler(enabled=config.train.use_amp)
 
-    logger.info(f"Parameter count: ~{format(utils.param_count(inner_model), ',')}")
+    logger.info(f"👾 Parameter count: ~{format(utils.param_count(inner_model), ',')}")
 
     # Load checkpoints if resuming training
-    if config.train.resume_path is not None:
-        logger.info(f"⛽️ Loading checkpoint from {config.train.resume_path}")
-        checkpoint = torch.load(config.train.resume_path)
-        model.load_state_dict(checkpoint["model"], strict=True)
+    if config.train.checkpoint_path is not None:
+        logger.info(f"⏳ Loading checkpoint from {config.train.checkpoint_path}")
+        checkpoint = torch.load(config.train.checkpoint_path)
+        diff.load_state_dict(checkpoint["model"], strict=True)
         # Move model to GPU if available before loading optimizer state
         if torch.cuda.is_available():
-            model.cuda()
+            diff.cuda()
         optimizer.load_state_dict(checkpoint["optimizer"])
         lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
         scaler.load_state_dict(checkpoint["scaler"])
@@ -268,15 +271,16 @@ if __name__ == "__main__":
     else:
         step_state = 0
         if torch.cuda.is_available():
-            model.cuda()
+            diff.cuda()
 
     if dist.is_initialized():
-        model = torch.nn.parallel.DistributedDataParallel(
-            model,
+        diff = torch.nn.parallel.DistributedDataParallel(
+            diff,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             find_unused_parameters=True,
         )
         dist.barrier()
 
-    train(config, model, optimizer, lr_scheduler, scaler, tokenizer, step_state)
+    logger.info("🏁 Starting training...") 
+    train(config, diff, optimizer, lr_scheduler, scaler, tokenizer, step_state)

@@ -19,14 +19,14 @@ logger = logging.getLogger(__name__)
 def generate(
     config: oc.DictConfig,
     diff: torch.nn.Module,
+    shape: Tuple[int, int, int],
     tokenizer: transformers.PreTrainedTokenizer,
-    num_samples: Optional[int] = 8,
     device: Optional[Union[torch.device, str]] = "cuda:0",
 ):
     diff.eval()
     start_time = time.perf_counter()
     samples = diff.sample(
-        shape=(num_samples, config.model.max_gen_len, embed_dim),
+        shape=shape,
         num_steps=config.model.num_gen_steps,
         sampler=diffusion.get_sampler(config.model.sampler),
         use_self_cond=config.model.use_self_cond,
@@ -98,5 +98,6 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         diff.cuda()
 
+    shape = (args.num_samples, config.data.max_seq_len, embed_dim)
     logger.info("🏁 Starting generation...") 
     generate(config, diff, tokenizer, num_samples=args.num_samples, device=args.device)
