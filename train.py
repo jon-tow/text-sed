@@ -30,7 +30,7 @@ def train(
     device: Optional[Union[torch.device, str]] = "cuda:0",
 ):
     # Initialize datasets
-    logger.info("📦 Loading dataset...") 
+    logger.info("📦 Loading dataset...")
     text_datasets = {
         "train": datasets.load_dataset(
             config.data.name,
@@ -46,7 +46,7 @@ def train(
         ),
     }
 
-    logger.info("📦 Loading dataloaders...") 
+    logger.info("📦 Loading dataloaders...")
     # Initialize data loaders
     dataloaders = {
         "train": utils.text_dataloader(
@@ -104,14 +104,17 @@ def train(
 
         # Evaluate and log the validation stats
         if step % config.train.eval_every == 0:
-            model.eval()
+            logger.info(
+                "📊 Evaluating... WARNING: Evaluation is slow! Run evaluations on checkpoints instead."
+            )
+            # model.eval()
             # TODO: The `BatchSampler` + `DataLoader` prepends an extra dimension to
             # the data. This is a hack to remove it.
-            valid_inputs = next(valid_iter)["input_ids"].to(device)[0]
-            with torch.no_grad():
-                _, valid_stats = model(valid_inputs)
-            wandb.log({f"valid/{k}": v for k, v in valid_stats.items()}, step=step)
-            model.train()
+            # valid_inputs = next(valid_iter)["input_ids"].to(device)[0]
+            # with torch.no_grad():
+            #     _, valid_stats = model(valid_inputs)
+            # wandb.log({f"valid/{k}": v for k, v in valid_stats.items()}, step=step)
+            # model.train()
             # Save latest checkpoint
             if utils.is_main_process():
                 logger.info(f"💾 Saving latest checkpoint")
@@ -132,7 +135,11 @@ def train(
             model.eval()
             # TODO: Add if-statement to unwrap DDP model
             samples = model.module.sample(
-                shape=(config.train.num_samples, config.model.max_gen_len, config.model.word_embed_dim),
+                shape=(
+                    config.train.num_samples,
+                    config.model.max_gen_len,
+                    config.model.word_embed_dim,
+                ),
                 num_steps=config.model.num_gen_steps,
                 sampler=diffusion.get_sampler(config.model.sampler),
                 # use_self_cond=config.model.use_self_cond,
@@ -282,5 +289,5 @@ if __name__ == "__main__":
         )
         dist.barrier()
 
-    logger.info("🏁 Starting training...") 
+    logger.info("🏁 Starting training...")
     train(config, diff, optimizer, lr_scheduler, scaler, tokenizer, step_state)

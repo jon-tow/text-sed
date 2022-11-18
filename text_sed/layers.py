@@ -150,7 +150,7 @@ class ParallelEncoderBlock(nn.Module):
     ):
         super().__init__()
         self.num_heads = num_heads
-        self.scale = math.sqrt(head_dim) ** -1.0  # Scaled dot-product attention factor: 1 / √dₖ
+        self.scale = head_dim ** (-0.5)  # Scaled dot-product attention factor: 1 / √dₖ
         self.norm = nn.LayerNorm(model_dim)
 
         # Fused input projection: ((Wᵢq, Wᵢᵏ, Wᵢᵛ), (W1, W2))
@@ -197,7 +197,6 @@ class TransformerEncoder(nn.Module):
         head_dim: Optional[int] = 64,
         num_heads: Optional[int] = 16,
         num_layers: Optional[int] = 12,
-        use_self_cond: Optional[bool] = False,
         ff_mult: Optional[int] = 4,
     ):
         super().__init__()
