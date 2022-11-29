@@ -10,7 +10,7 @@ import omegaconf as oc
 import torch
 import transformers
 
-from text_sed import diffusion, layers
+from text_sed import diffusion, layers, utils
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,7 +29,6 @@ def generate(
         shape=shape,
         num_steps=config.model.num_gen_steps,
         sampler=diffusion.get_sampler(config.model.sampler),
-        use_self_cond=config.model.use_self_cond,
         time_delta=config.model.time_delta,
         device=device,
     )
@@ -63,9 +62,7 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
 
-    torch.manual_seed(config.seed)
-    random.seed(config.seed)
-    np.random.seed(config.seed)
+    utils.set_seed(config.seed, use_device_specific_seeds=True)
 
     # Initialize tokenizer - turn off HuggingFace parallelism warnings
     logger.info("⏳ Loading tokenizer...") 
@@ -78,22 +75,22 @@ if __name__ == "__main__":
 
     embed_mat, embed_dim = layers.auto_extract_embed_mat(config.model.embed_model_name)
     inner_model = layers.TransformerEncoder(
-        word_embed_dim=embed_dim,
+        embed_dim=config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
         model_dim=config.model.model_dim,
+        max_seq_len=config.model.seq_len,
         head_dim=config.model.head_dim,
         num_heads=config.model.num_heads,
-        use_self_cond=config.model.use_self_cond,
-        dropout=config.model.dropout,
     )
     diff = diffusion.TextSed(
         model=inner_model,
         embed_mat=embed_mat,
         noise_schedule=diffusion.get_noise_schedule(config.model.noise_schedule),
+        bottleneck_dim=config.model.bottleneck_dim,
     )
 
     logger.info(f"⏳ Loading checkpoint from {config.train.checkpoint_path}") 
     checkpoint = torch.load(config.train.checkpoint_path)
-    diff.load_state_dict(checkpoint["model"], strict=True)
+    diff.load_state_dict(checkpoint, strict=True)
     # Move model to GPU if available before loading optimizer state
     if torch.cuda.is_available():
         diff.cuda()

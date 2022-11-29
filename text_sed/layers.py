@@ -17,12 +17,65 @@ NamedTensor = Literal  # __Naive__ named tensor
 Generator = NewType("Generator", torch.Generator)
 
 
+def l2norm(t, groups = 1):
+    """lucid's l2norm"""
+    t = rearrange(t, '... (g d) -> ... g d', g = groups)
+    t = F.normalize(t, p = 2, dim = -1)
+    return rearrange(t, '... g d -> ... (g d)')
+
+
+class PretrainedEmbedding(nn.Module):
+    def __init__(
+        self,
+        embed_mat: NamedTensor["vocab", "embed"],
+        use_normalization: bool = True,
+        freeze: bool = False,
+    ):
+        super().__init__()
+        self.use_normalization = use_normalization
+        _, embed_dim = embed_mat.shape
+        self.scale = math.sqrt(embed_dim)  # √D
+        self.embed = nn.Embedding.from_pretrained(embed_mat.detach().clone(), freeze=freeze)
+
+    def forward(
+        self, x: NamedTensor["batch", "vocab"]
+    ) -> NamedTensor["batch", "embed"]:
+        embeds = self.embed(x)
+        if self.use_normalization:
+            embeds = l2norm(embeds) * self.scale
+        return embeds
+
+
+class PretrainedUnEmbedding(nn.Module):
+    def __init__(self, embed_mat: NamedTensor["vocab", "embed"], use_renormalization: bool = True):
+        super().__init__()
+        self.renormalize = use_renormalization
+        # LM head style scoring
+        vocab_size, embed_dim = embed_mat.shape
+        self.unembed = nn.Linear(embed_dim, vocab_size, bias=False)
+        with torch.no_grad():
+            self.unembed.weight.copy_(embed_mat.detach().clone())
+
+    def forward(
+        self, x: NamedTensor["batch", "pos", "dim"]
+    ) -> NamedTensor["batch", "pos", "vocab"]:
+        # CDCD Framework: Apply L2-normalisation to the embedding estimate
+        # before calculating the score estimate (__renormalisation__).
+
+        # TODO: This is probably the wrong place to put it?
+
+        if self.renormalize:
+            x = l2norm(x)
+        return self.unembed(x)
+
+
 class ConditionScaleAndBias(nn.Module):
     """FiLM-style conditioning: https://distill.pub/2018/feature-wise-transformations/"""
+
     def __init__(self, dim: int):
         super().__init__()
         self.conditioner = nn.Sequential(
-            nn.SiLU(), # nn.Sigmoid()
+            nn.SiLU(),
             nn.Linear(dim, 2 * dim),
         )
 
@@ -53,10 +106,39 @@ def auto_extract_embed_mat(
     return embed_mat, embed_dim
 
 
+def rotate_half(x):
+    x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+@torch.jit.script
+def apply_rotary_position_embedding(
+    x: torch.Tensor,
+    freqs: torch.Tensor,
+    seq_dim: int = -2,
+):
+    seq_len = x.shape[seq_dim]
+    freqs = freqs[-seq_len:, :]
+    return (x * torch.cos(freqs)) + (rotate_half(x) * torch.sin(freqs))
+
+
+class RotaryPositionEmbedding(nn.Module):
+    def __init__(self, dim: int, max_period: int = 10_000):
+        super().__init__()
+        inv_freq = 1. / (max_period ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+
+    def forward(self, x: int, seq_dim: int = -2):
+        seq_len = x.shape[seq_dim]
+        t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
+        freqs = torch.einsum('i , j -> i j', t, self.inv_freq)
+        return torch.cat((freqs, freqs), dim=-1).to(x.device)
+
+
 def fixed_position_embedding(
     dim: int,
     num_pos: int,
-    max_period: Optional[int] = 10_000,
+    max_period: int = 10_000,
 ) -> Tuple[NamedTensor["...", "pos", "dim"]]:
     inv_freq = 1.0 / (max_period ** (torch.arange(0, dim, 2) / dim))
     sinusoid = torch.einsum("i , j -> i j", torch.arange(num_pos), inv_freq)
@@ -69,7 +151,7 @@ class FixedPositionEmbedding(nn.Module):
         self.dim = dim
         self.max_period = max_period
 
-    def __call__(
+    def forward(
         self,
         input: NamedTensor["...", "pos", "dim"],
         seq_dim: Optional[int] = -2,
@@ -83,7 +165,42 @@ class FixedPositionEmbedding(nn.Module):
         return torch.concat([sincos[0], sincos[1]], dim=-1).to(input.device)
 
 
-# TODO: Add Kat's Fourier embedding: https://github.com/crowsonkb/k-diffusion/blob/f4e99857772fc3a126ba886aadf795a332774878/k_diffusion/layers.py#L219
+class LearnedPositionEmbedding(nn.Module):
+    def __init__(self, dim, max_seq_len, init_scale=1.0):
+        super().__init__()
+        self.max_seq_len = max_seq_len
+        self.init_scale = init_scale
+        self.weight = nn.Parameter(torch.empty(size=(max_seq_len, dim)))
+        self.reset_params()
+
+    def reset_params(self):
+        nn.init.normal_(self.weight, std=0.01 * self.init_scale)
+
+    def forward(
+        self,
+        x: NamedTensor["...", "pos", "dim"],
+        start_pos: int = 0,
+        seq_dim: int = -2,
+    ) -> NamedTensor["pos", "dim"]:
+        end_pos = start_pos + x.shape[seq_dim]
+        assert end_pos <= self.max_seq_len, (
+            f"Positional embedding doesnt exist for position {end_pos}. This is likely due to "
+            f"feeding a sequence that's longer than the context length n_ctx={self.dim}."
+        )
+        return self.weight[start_pos:end_pos]
+
+
+class RandomFourierEmbedding(nn.Module):
+    # Kat's Fourier embedding:
+    # https://github.com/crowsonkb/k-diffusion/blob/f4e99857772fc3a126ba886aadf795a332774878/k_diffusion/layers.py#L219
+    def __init__(self, in_features, out_features, std=1.):
+        super().__init__()
+        assert out_features % 2 == 0
+        self.register_buffer('weight', torch.randn([out_features // 2, in_features]) * std)
+
+    def forward(self, input):
+        f = 2 * math.pi * input @ self.weight.T
+        return torch.cat([f.cos(), f.sin()], dim=-1)
 
 
 class SinusoidalTimeEmbedding(nn.Module):
@@ -102,6 +219,23 @@ class SinusoidalTimeEmbedding(nn.Module):
         )
         timescale = time[:, None] * inv_timescale[None, :]
         return torch.concat([torch.sin(timescale), torch.cos(timescale)], -1)
+
+
+class TimeEmbedding(nn.Module):
+    def __init__(self, model_dim: int, time_dim: Optional[int] = None, embed_name: str = "fourier"):
+        super().__init__()
+        time_dim = 4 * model_dim if time_dim is None else time_dim
+        embed = RandomFourierEmbedding(model_dim, time_dim) if embed_name == "fourier" else \
+            SinusoidalTimeEmbedding(model_dim)
+        self.time_embed = nn.Sequential(
+            embed,
+            nn.Linear(model_dim, time_dim),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(time_dim, model_dim),
+        )
+
+    def forward(self, time: NamedTensor["batch"]) -> NamedTensor["batch dim"]:
+        return self.time_embed(time)
 
 
 # Attention Helpers
@@ -146,12 +280,19 @@ class ParallelEncoderBlock(nn.Module):
         model_dim: int,
         head_dim: int,
         num_heads: int,
-        ff_mult: Optional[int] = 4,  # Inner ff upscale factor (d_ff * 4)
+        ff_mult: int = 4,  # Inner ff upscale factor (d_ff * 4)
+        use_conditioner: bool = True,
+        use_rotary: bool = True,
+        rotary_dim: Optional[int] = None,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.scale = head_dim ** (-0.5)  # Scaled dot-product attention factor: 1 / √dₖ
         self.norm = nn.LayerNorm(model_dim)
+
+        rotary_embed_dim = max(head_dim // 2 if rotary_dim is None else rotary_dim, 32)
+        self.rotary_pos_embed = RotaryPositionEmbedding(rotary_embed_dim) if use_rotary else None
+        self.conditioner = ConditionScaleAndBias(model_dim) if use_conditioner else None
 
         # Fused input projection: ((Wᵢq, Wᵢᵏ, Wᵢᵛ), (W1, W2))
         # 1 matmul for all input projections.
@@ -167,17 +308,32 @@ class ParallelEncoderBlock(nn.Module):
     def forward(
         self,
         inputs: NamedTensor["...", "pos", "dim"],
+        time_embeds: Optional[NamedTensor["batch dim"]] = None,
     ) -> Tensor:
         # Pre-Norm: [..., pos, dim]
         units = self.norm(inputs)
+        if self.conditioner:
+            units = self.conditioner(units, time_embeds)
 
         # Input Projects: [..., pos, *fused_dims]
         proj_units = self.proj_in(units)
         q, k, v, ff, ff_gate = split_fused_proj(proj_units, self.fused_dims)
 
-        # Attention
+        # Self-Attention
         # [..., num_heads, pos, head_dim]
         q, k, v = map(partial(split_heads, num_heads=self.num_heads), (q, k, v))
+        if self.rotary_pos_embed:
+            pos_embeds = self.rotary_pos_embed(k)
+            rot_dim = pos_embeds.shape[-1]
+
+            q_left, q_right = q[..., :rot_dim], q[..., rot_dim:]
+            k_left, k_right = k[..., :rot_dim], k[..., rot_dim:]
+            
+            q_left = apply_rotary_position_embedding(q_left, pos_embeds)
+            k_left = apply_rotary_position_embedding(k_left, pos_embeds)
+
+            k = torch.cat([k_left, k_right], dim=-1)
+            q = torch.cat([q_left, q_right], dim=-1)
         attn = multihead_attn(q, k, v, scale=self.scale)
         concat = merge_heads(attn)  # [..., pos, (num_heads * head_dim)]
 
@@ -190,49 +346,54 @@ class ParallelEncoderBlock(nn.Module):
 class TransformerEncoder(nn.Module):
     def __init__(
         self,
-        word_embed_dim: int,
+        embed_dim: int,
         model_dim: int,
+        max_seq_len: int,
         *,
-        dropout: Optional[float] = 0.1,
         head_dim: Optional[int] = 64,
         num_heads: Optional[int] = 16,
         num_layers: Optional[int] = 12,
         ff_mult: Optional[int] = 4,
+        use_rotary: bool = True,
+        rotary_dim: Optional[int] = None,
     ):
         super().__init__()
+        self.num_layers = num_layers
 
-        time_dim = 4 * model_dim 
-        self.time_embed = nn.Sequential(
-            SinusoidalTimeEmbedding(model_dim),
-            nn.Linear(model_dim, time_dim),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(time_dim, model_dim),
-        )
-        self.pos_embed = FixedPositionEmbedding(model_dim)
-        self.embed_drop = nn.Dropout(dropout)
-
+        self.time_embed = TimeEmbedding(model_dim, embed_name="sine")
+        # self.pos_embed = LearnedPositionEmbedding(model_dim, max_seq_len)
+        # self.pos_embed = FixedPositionEmbedding(model_dim)
+        
         # 2x b/c of self-conditioning concat of input and condition signal
-        self.in_proj = nn.Linear(2 * word_embed_dim, model_dim)
-        self.out_proj = nn.Sequential(
-            nn.LayerNorm(model_dim),
-            nn.Linear(model_dim, word_embed_dim), 
-        )
-
+        self.in_proj = nn.Sequential(nn.Linear(2 * embed_dim, model_dim))
         self.blocks = nn.ModuleList([
-            ParallelEncoderBlock(model_dim, head_dim, num_heads, ff_mult=ff_mult)
+            ParallelEncoderBlock(
+                model_dim,
+                head_dim,
+                num_heads,
+                ff_mult=ff_mult,
+                use_rotary=use_rotary,
+                rotary_dim=rotary_dim
+            )
             for _ in range(num_layers)
         ])
-
+        self.out_proj = nn.Sequential(
+            nn.LayerNorm(model_dim),
+            nn.Linear(model_dim, embed_dim),
+        )
+        self.final_norm = nn.LayerNorm(embed_dim)
+    
     def forward(
         self,
         inputs: NamedTensor["batch", "pos", "dim"],
         self_cond: NamedTensor["batch", "pos", "dim"],
         time: NamedTensor["batch"],
     ) -> NamedTensor["batch", "pos", "embed"]:
-        time_embed = rearrange(self.time_embed(time), "... d -> ... 1 d")
-        inputs = self.in_proj(torch.concat([inputs, self_cond], dim=-1))
-        hidden = inputs + self.pos_embed(inputs) + time_embed
-        hidden = self.embed_drop(hidden)
+        cond_embeds = self.in_proj(torch.concat([inputs, self_cond], dim=-1))
+        # pos_embeds = self.pos_embed(cond_embeds)
+        time_embeds = rearrange(self.time_embed(time), "... d -> ... 1 d")
+        hiddens = cond_embeds # + pos_embeds
         for block in self.blocks:
-            hidden = block(hidden)
-        return self.out_proj(hidden)
+            hiddens = block(hiddens, time_embeds)
+        hiddens = self.out_proj(hiddens)
+        return self.final_norm(hiddens)

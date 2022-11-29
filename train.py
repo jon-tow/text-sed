@@ -67,7 +67,7 @@ def train(
         ),
     }
     train_iter = iter(dataloaders["train"])
-    valid_iter = iter(dataloaders["valid"])
+    # valid_iter = iter(dataloaders["valid"])
 
     model.train()
     for step in tqdm.trange(
@@ -116,18 +116,18 @@ def train(
             # wandb.log({f"valid/{k}": v for k, v in valid_stats.items()}, step=step)
             # model.train()
             # Save latest checkpoint
-            if utils.is_main_process():
-                logger.info(f"💾 Saving latest checkpoint")
-                checkpoint = {
-                    "model": model.module.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "lr_scheduler": lr_scheduler.state_dict(),
-                    "scaler": scaler.state_dict(),
-                    "step": step,
-                    "config": config,
-                }
-                path = os.path.join(config.output_dir, f"latest.pth")
-                torch.save(checkpoint, path)
+            # if utils.is_main_process():
+            #     logger.info(f"💾 Saving latest checkpoint")
+            #     checkpoint = {
+            #         "model": model.module.state_dict(),
+            #         "optimizer": optimizer.state_dict(),
+            #         "lr_scheduler": lr_scheduler.state_dict(),
+            #         "scaler": scaler.state_dict(),
+            #         "step": step,
+            #         "config": config,
+            #     }
+            #     path = os.path.join(config.output_dir, f"latest.pth")
+            #     torch.save(checkpoint, path)
 
         # Generate samples
         is_sample_step = step % config.train.sample_every == 0 and step != 0
@@ -138,11 +138,10 @@ def train(
                 shape=(
                     config.train.num_samples,
                     config.model.max_gen_len,
-                    config.model.word_embed_dim,
+                    config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
                 ),
                 num_steps=config.model.num_gen_steps,
                 sampler=diffusion.get_sampler(config.model.sampler),
-                # use_self_cond=config.model.use_self_cond,
                 time_delta=config.model.time_delta,
                 device=inputs.device,
             )
@@ -210,16 +209,7 @@ if __name__ == "__main__":
             id=config.logging.wandb_id,
         )
 
-    # Seed RNGs for ~reproducibility
-    seeds = torch.randint(
-        -(2**63),
-        2**63 - 1,
-        [dist.get_world_size() if dist.is_initialized() else 1],
-        generator=torch.Generator().manual_seed(config.seed),
-    )
-    torch.manual_seed(seeds[utils.get_rank()])
-    random.seed(config.seed)
-    np.random.seed(config.seed)
+    utils.set_seed(config.seed, use_device_specific_seeds=True)
 
     # Initialize tokenizer - turn off HuggingFace parallelism warnings
     logger.info("⏳ Loading tokenizer...")
@@ -233,18 +223,17 @@ if __name__ == "__main__":
     # Initialize model and optimizer
     embed_mat, embed_dim = layers.auto_extract_embed_mat(config.model.embed_model_name)
     inner_model = layers.TransformerEncoder(
-        word_embed_dim=config.model.word_embed_dim,
+        embed_dim=config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
         model_dim=config.model.model_dim,
+        max_seq_len=config.model.seq_len,
         head_dim=config.model.head_dim,
         num_heads=config.model.num_heads,
-        use_self_cond=config.model.use_self_cond,
-        dropout=config.model.dropout,
     )
     diff = diffusion.TextSed(
         model=inner_model,
-        word_embed_dim=config.model.word_embed_dim,
         embed_mat=embed_mat,
         noise_schedule=diffusion.get_noise_schedule(config.model.noise_schedule),
+        bottleneck_dim=config.model.bottleneck_dim,
     )
     optimizer = torch.optim.AdamW(
         utils.get_grouped_params(diff, config.optimizer.weight_decay),

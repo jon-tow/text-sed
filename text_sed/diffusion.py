@@ -1,11 +1,14 @@
 import functools
 import math
+import random
 from typing import Callable, Literal, NewType, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, reduce
+
+from text_sed.layers import PretrainedEmbedding, PretrainedUnEmbedding
 
 from . import utils
 
@@ -95,7 +98,7 @@ def ddim_step(
     time_now: Tensor,  # t
     time_next: Tensor,  # t - 1
     schedule: Callable,
-    # scale: Optional[float] = 1.0,
+    scale: float = 1.0,
 ) -> Tensor:  # xₜ₋₁
     """Denoising diffusion implicit model step with η = 0. Estimates x₀ at
     time_next with the DDIM updating rule.
@@ -105,10 +108,12 @@ def ddim_step(
         https://arxiv.org/pdf/2010.02502.pdf
     - Lilian Weng.
         https://lilianweng.github.io/posts/2021-07-11-diffusion-models/#speed-up-diffusion-model-sampling
+    - Clamping Trick (see footnote 6 in the paper):
+        Li et al. "Diffusion-LM Improves Controllable Text Generation". 2022
     """
     # TODO: Remove unicode characters after coming up with good var names.
     xₜ, x̃ₒ = noisy_inputs, pred_inputs
-    # x̃ₒ = torch.clip(x̃ₒ, -scale, scale)
+    x̃ₒ = x̃ₒ.clamp(-scale, scale)
     ᾱₜ, ᾱₙ = schedule(time_now), schedule(time_next)  # ᾱₙ = ᾱₜ₋₁
     ϵ = (xₜ - torch.sqrt(ᾱₜ) * x̃ₒ) * torch.rsqrt(1 - ᾱₜ)
     # Next estimate (xₙ := xₜ₋₁)
@@ -122,7 +127,7 @@ def ddpm_step(
     time_now: Tensor,      # t
     time_next: Tensor,     # t - 1
     schedule: Callable,
-    # scale: Optional[float] = 1.0,
+    scale: float = 1.0,
 ) -> Tensor:               # xₜ₋₁
     """Denoising diffusion implicit model step with η = 1. Estimates x₀ at
     time_next with the DDPM updating rule.
@@ -130,13 +135,15 @@ def ddpm_step(
     References:
     - Ho et al. "Denoising Diffusion Probabilistic Models". 2020.
         https://arxiv.org/abs/2006.11239
+    - Clamping Trick (see footnote 6 in the paper):
+        Li et al. "Diffusion-LM Improves Controllable Text Generation". 2022
     """
     xₜ, x̃ₒ = noisy_inputs, pred_inputs
+    x̃ₒ = x̃ₒ.clamp(-scale, scale)
     γₜ = schedule(time_now)
     ᾱₜ = γₜ / schedule(time_next)
     σₜ = torch.sqrt(1 - ᾱₜ)
     z = torch.randn_like(σₜ)
-    # x̃ₒ = torch.clip(x̃ₒ, -scale, scale)
     ϵ = (xₜ - torch.sqrt(γₜ) * x̃ₒ) * torch.rsqrt(1 - γₜ)
     xₙ = torch.rsqrt(ᾱₜ) * (xₜ - ((1 - ᾱₜ) * torch.rsqrt(1 - γₜ)) * ϵ) + σₜ * z
     return xₙ
@@ -195,39 +202,38 @@ class TextSed(nn.Module):
         self,
         model: nn.Module,
         embed_mat: NamedTensor["vocab", "embed"],
-        word_embed_dim: int,
-        noise_schedule: Optional[Callable] = get_noise_schedule("cosine"),
-        use_self_cond: Optional[bool] = True,
+        use_self_cond: bool = True,
+        noise_schedule: Callable = get_noise_schedule("cosine"),
+        bottleneck_dim: Optional[int] = None,
     ):
         super().__init__()
         self.model = model
         self.use_self_cond = use_self_cond
         self.noise_schedule = noise_schedule
 
-        vocab_size, embed_dim = embed_mat.shape
+        _, embed_dim = embed_mat.shape
 
         # Discrete-to-continuous fixed read-in matrix: E ϵ Rⱽˣᴰ
-        scale = math.sqrt(embed_dim)  # Fixed norm: √D
-        read_in_mat = scale * F.normalize(embed_mat.detach().clone(), dim=-1)
         self.read_in = nn.Sequential(
-            nn.Embedding.from_pretrained(read_in_mat, freeze=True),
-            # Bottleneck layer to shrink word: D → D'
-            nn.Linear(embed_dim, word_embed_dim),
+            PretrainedEmbedding(embed_mat, use_normalization=True),
+            *[
+                # Bottleneck layer to shrink word embeddings: D → D'
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, bottleneck_dim)
+            ] if bottleneck_dim else [nn.Identity()],
         )
-
         # Continous-to-discrete learnable read-out matrix
         self.read_out = nn.Sequential(
-            # "Add a linear output projection layer E′ which takes the output of
-            # the transformer y ∈ Rᴺˣᴰ and projects each element (yᵢ) 1 ≤ i ≤ N
-            # back to the same size as the word embeddings, `embed_dim`."
-            nn.Linear(word_embed_dim, embed_dim),
-            nn.LayerNorm(embed_dim),
-            # LM head
-            nn.Linear(embed_dim, vocab_size)
-         ) # E′
-        with torch.no_grad():
+            *[
+                # "Add a linear output projection layer E′ which takes the output of
+                # the transformer y ∈ Rᴺˣᴰ and projects each element (yᵢ) 1 ≤ i ≤ N
+                # back to the same size as the word embeddings, `embed_dim`."
+                nn.Linear(bottleneck_dim, embed_dim),
+                nn.LayerNorm(embed_dim),
+            ] if bottleneck_dim else [nn.Identity()],
             # Initalize read-out (R) to: Eᵀ ϵ Rᴰˣⱽ
-            self.read_out[-1].weight.copy_(embed_mat.detach().clone())
+            PretrainedUnEmbedding(embed_mat, use_renormalization=False),
+         ) # E′
 
     def forward(
         self,
@@ -250,7 +256,7 @@ class TextSed(nn.Module):
 
         # Compute self-conditioning estimate
         cond_embeds = torch.zeros_like(noisy_embeds, dtype=noisy_embeds.dtype)
-        if use_self_cond and torch.rand((1,)).item() > 0.5:
+        if use_self_cond and random.random() > 0.5:
             with torch.no_grad():
                 cond_embeds = self.model(noisy_embeds, cond_embeds, time).detach()
 
@@ -279,9 +285,8 @@ class TextSed(nn.Module):
         num_steps: int,
         *,
         sampler: Optional[Callable] = ddim_step,
-        use_self_cond: Optional[bool] = True,
-        conds: Optional[NamedTensor["batch", "pos", "embed"]] = None,
-        guide_scale: Optional[float] = None,
+        # conds: Optional[NamedTensor["batch", "pos", "embed"]] = None,
+        # guide_scale: Optional[float] = None,
         time_delta: Optional[float] = 0.0,
         device: Optional[Device] = "cuda:0",
     ) -> NamedTensor:
@@ -310,23 +315,23 @@ class TextSed(nn.Module):
                 device=device,
             )
 
-            if guide_scale is not None and conds is None:  # Self-conditioning guidance
-                # Predict start embeds (eₒ) without self-cond
-                ũₒ = self.model(eₜ, torch.zeros_like(eₜ), time_now)
-                # Predict start embeds (eₒ) with self-conditiong
-                c̃ₒ = self.model(eₜ, ũₒ, time_now)
-                # Apply self-conditioning guidance
-                ẽₒ = guide_scale * c̃ₒ + (1.0 - guide_scale) * ũₒ 
-            elif guide_scale is not None and conds is not None:  # Classifier Free Guidance
-                # Predict start embeds (eₒ) without self-cond
-                cond_embeds = self.read_in(conds)
-                ũₒ = self.model(eₜ, torch.zeros_like(eₜ), time_now)
-                # Predict start embeds (eₒ) with self-conditiong
-                c̃ₒ = self.model(eₜ, ũₒ, time_now)
-                # ẽₒ = guide_scale * ũₒ
-            else:
-                # Self-conditioned prediction using the previous predictions, ẽₒ
-                ẽₒ = self.model(eₜ, ẽₒ, time_now)
+            # if guide_scale is not None and conds is None:  # Self-conditioning guidance
+            #     # Predict start embeds (eₒ) without self-cond
+            #     ũₒ = self.model(eₜ, torch.zeros_like(eₜ), time_now)
+            #     # Predict start embeds (eₒ) with self-conditiong
+            #     c̃ₒ = self.model(eₜ, ũₒ, time_now)
+            #     # Apply self-conditioning guidance
+            #     ẽₒ = guide_scale * c̃ₒ + (1.0 - guide_scale) * ũₒ 
+            # elif guide_scale is not None and conds is not None:  # Classifier Free Guidance
+            #     # Predict start embeds (eₒ) without self-cond
+            #     cond_embeds = self.read_in(conds)
+            #     ũₒ = self.model(eₜ, torch.zeros_like(eₜ), time_now)
+            #     # Predict start embeds (eₒ) with self-conditiong
+            #     c̃ₒ = self.model(eₜ, ũₒ, time_now)
+            #     # ẽₒ = guide_scale * ũₒ
+            # else:
+            # Self-conditioned prediction using the previous predictions, ẽₒ
+            ẽₒ = self.model(eₜ, ẽₒ, time_now)
 
             # Estimate embeds at time_next eₜ₋₁
             eₜ = sampler(eₜ, ẽₒ, time_now, time_next, self.noise_schedule)
