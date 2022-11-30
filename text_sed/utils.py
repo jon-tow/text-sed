@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 Shape = NewType("Shape", Tuple[int, ...])
 
 
+def get_timestamp() -> str:
+    import datetime
+    return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+
 def set_seed(seed: int, use_device_specific_seeds: bool = False):
     import random
     import numpy as np

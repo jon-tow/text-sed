@@ -132,6 +132,7 @@ def train(
         # Generate samples
         is_sample_step = step % config.train.sample_every == 0 and step != 0
         if is_sample_step and utils.is_main_process():
+            logger.info("💬 Generating samples...")
             model.eval()
             # TODO: Add if-statement to unwrap DDP model
             samples = model.module.sample(
@@ -146,7 +147,7 @@ def train(
                 device=inputs.device,
             )
             samples = tokenizer.batch_decode(samples, skip_special_tokens=True)
-            sample_log = "💬 Generating samples:\n"
+            sample_log = "🎙 Samples: \n"
             for sample in samples:
                 sample_log += f"➜ {sample}\n"
             logger.info(sample_log)
@@ -185,6 +186,10 @@ if __name__ == "__main__":
     config = oc.OmegaConf.load(args.config)
     if args.name is not None:
         oc.OmegaConf.update(config, "name", args.name)
+    else:
+        # Add timestamp to checkpoint dir name
+        # TODO: There's probably a better way to do this...
+        oc.OmegaConf.update(config, "output_dir", f"{config.output_dir}-{utils.get_timestamp()}")
 
     os.makedirs(config.output_dir, exist_ok=True)
     if dist.is_initialized():
@@ -208,8 +213,8 @@ if __name__ == "__main__":
             name=f"{config.name}-{wandb_id}",
             config=utils.flatten_dict(oc.OmegaConf.to_container(config)),
             id=wandb_id,
-            group=config.logging.wandb_group,
-            job_type="train",
+            # group=config.logging.wandb_group,
+            # job_type="train",
         )
 
     utils.set_seed(config.seed, use_device_specific_seeds=True)
