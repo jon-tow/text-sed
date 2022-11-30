@@ -7,10 +7,10 @@ model:
   num_layers: 12
   bottleneck_dim: 256
   model_dim: 1024
-  num_heads: 12
   head_dim: 128
-  seq_len: 64
-  max_gen_len: 64
+  num_heads: 12
+  seq_len: 32
+  max_gen_len: 32
   scale: 1.0
   num_steps: 1000
   num_gen_steps: 1000
@@ -57,7 +57,7 @@ data:
   num_preprocess_workers: 1
 
 logging:
-  use_wandb: true
   wandb_id: null
   wandb_entity: "jon-tow"
   wandb_project: ${name}
+  wandb_group: null

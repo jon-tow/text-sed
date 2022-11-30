@@ -1,7 +1,9 @@
+"""
+Basic Usage:
+    torchrun --nproc_per_node=N train.py
+"""
 import argparse
-import logging
 import os
-import random
 from typing import *
 
 import datasets
@@ -16,9 +18,6 @@ import wandb
 from text_sed import diffusion, layers, slurm, utils
 
 
-logger = logging.getLogger(__name__)
-
-
 def train(
     config: oc.DictConfig,
     model: torch.nn.Module,
@@ -27,6 +26,7 @@ def train(
     scaler: torch.cuda.amp.GradScaler,
     tokenizer: transformers.PreTrainedTokenizer,
     step_state: Optional[int] = 0,
+    run: Optional["wandb.Run"] = None,
     device: Optional[Union[torch.device, str]] = "cuda:0",
 ):
     # Initialize datasets
@@ -96,14 +96,14 @@ def train(
         optimizer.zero_grad(set_to_none=True)
 
         # Log training stats
-        if step % config.train.log_every == 0:
-            wandb.log({f"train/{k}": v for k, v in stats.items()}, step=step)
+        if step % config.train.log_every == 0 and utils.is_main_process():
+            run.log({f"train/{k}": v for k, v in stats.items()}, step=step)
             info = f"🎛 Step: {step}/{config.train.max_steps} "
             info += f"| Loss: {loss:.5f} | LR: {lr_scheduler.get_last_lr()[0]:.6f}"
             logger.info(info)
 
         # Evaluate and log the validation stats
-        if step % config.train.eval_every == 0:
+        if step % config.train.eval_every == 0 and utils.is_main_process():
             logger.info(
                 "📊 Evaluating... WARNING: Evaluation is slow! Run evaluations on checkpoints instead."
             )
@@ -113,7 +113,7 @@ def train(
             # valid_inputs = next(valid_iter)["input_ids"].to(device)[0]
             # with torch.no_grad():
             #     _, valid_stats = model(valid_inputs)
-            # wandb.log({f"valid/{k}": v for k, v in valid_stats.items()}, step=step)
+            # run.log({f"valid/{k}": v for k, v in valid_stats.items()}, step=step)
             # model.train()
             # Save latest checkpoint
             # if utils.is_main_process():
@@ -193,20 +193,23 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
 
-    logger.info(f"🖥 Device Count: {dist.get_world_size()}")
-
     # Set up logging
-    utils.init_logger(logger, config.output_dir)
+    logger = utils.init_logger(config.output_dir)
+    logger.info(f"🖥 Device Count: {dist.get_world_size()}")
+    logger.info(f"🎚 Config: {config}")
+    run = None
     if utils.is_main_process():
-        logger.info(f"Config: {config}")
-    if config.logging.use_wandb and utils.is_main_process():
         wandb.finish()  # Clear out any previous runs.
-        wandb.init(
+        wandb_id = wandb.util.generate_id() if config.logging.wandb_id is None else \
+            config.logging.wandb_id
+        run = wandb.init(
             project=config.logging.wandb_project,
             entity=config.logging.wandb_entity,
-            name=config.name,
+            name=f"{config.name}-{wandb_id}",
             config=utils.flatten_dict(oc.OmegaConf.to_container(config)),
-            id=config.logging.wandb_id,
+            id=wandb_id,
+            group=config.logging.wandb_group,
+            job_type="train",
         )
 
     utils.set_seed(config.seed, use_device_specific_seeds=True)
@@ -250,6 +253,7 @@ if __name__ == "__main__":
     )
     scaler = torch.cuda.amp.GradScaler(enabled=config.train.use_amp)
 
+    logger.info(f"🏘 Inner Model: {inner_model}")
     logger.info(f"👾 Parameter count: ~{format(utils.param_count(inner_model), ',')}")
 
     # Load checkpoints if resuming training
@@ -279,4 +283,8 @@ if __name__ == "__main__":
         dist.barrier()
 
     logger.info("🏁 Starting training...")
-    train(config, diff, optimizer, lr_scheduler, scaler, tokenizer, step_state)
+    try:
+        train(config, diff, optimizer, lr_scheduler, scaler, tokenizer, step_state, run=run)
+    except KeyboardInterrupt:
+        logger.info("🛑 Training interrupted by user.")
+    run.finish()

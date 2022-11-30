@@ -14,8 +14,10 @@ from torch.utils.data.sampler import BatchSampler, RandomSampler
 from .layers import LearnedAbsolutePositionalEmbedding
 
 
+logger = logging.getLogger(__name__)
+
+
 Shape = NewType("Shape", Tuple[int, ...])
-Tensor = NewType("Tensor", torch.Tensor)
 
 
 def set_seed(seed: int, use_device_specific_seeds: bool = False):
@@ -165,7 +167,7 @@ def flatten_dict(d: dict, parent_key: Optional[str] = "") -> dict:
     return flat_d
 
 
-def append_dims(x: Tensor, target_dims: int) -> Tensor:
+def append_dims(x: torch.Tensor, target_dims: int) -> torch.Tensor:
     """Appends dimensions to the end of a tensor until it has target_dims dimensions.
     Reference: @crowsonkb's `append_dims`.
     """
@@ -196,22 +198,20 @@ def is_main_process():
 
 
 def init_logger(
-    logger: logging.Logger,
     output_dir: str,
     stdout_only=False,
 ):
-    if dist.is_initialized():
-        dist.barrier()
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
     stdout_handler = logging.StreamHandler(sys.stdout)
     handlers = [stdout_handler]
     if not stdout_only:
         file_handler = logging.FileHandler(filename=os.path.join(output_dir, "run.log"))
         handlers.append(file_handler)
-    logger.setLevel(logging.INFO)
-    for handler in handlers:
-        handler.setFormatter(
-            logging.Formatter(
-                "[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s"
-            )
-        )
-        logger.addHandler(handler)
+    logging.basicConfig(
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO if is_main_process() else logging.WARN,
+        format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
+        handlers=handlers,
+    )
+    return logger

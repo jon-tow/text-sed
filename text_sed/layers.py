@@ -204,8 +204,8 @@ class RandomFourierEmbedding(nn.Module):
         assert out_features % 2 == 0
         self.register_buffer('weight', torch.randn([out_features // 2, in_features]) * std)
 
-    def forward(self, input):
-        f = 2 * math.pi * input @ self.weight.T
+    def forward(self, inputs: NamedTensor["batch"]) -> NamedTensor["batch", "dim"]:
+        f = 2 * math.pi * inputs @ self.weight.T
         return torch.cat([f.cos(), f.sin()], dim=-1)
 
 
@@ -228,19 +228,31 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 
 class TimeEmbedding(nn.Module):
-    def __init__(self, model_dim: int, time_dim: Optional[int] = None, embed_name: str = "sine"):
+    def __init__(
+        self,
+        dim: int,
+        ff_mult: int = 1,
+        use_fourier: bool = True,
+        max_period: Optional[int] = 10_000
+    ):
         super().__init__()
-        time_dim = 4 * model_dim if time_dim is None else time_dim
-        embed = RandomFourierEmbedding(model_dim, time_dim) if embed_name == "fourier" else \
-            SinusoidalTimeEmbedding(model_dim)
+        time_dim = ff_mult * dim
+        self.use_fourier = use_fourier
+        if use_fourier:
+            embed = RandomFourierEmbedding(1, dim)
+        else:
+            embed = SinusoidalTimeEmbedding(dim, max_period=max_period)
         self.time_embed = nn.Sequential(
             embed,
-            nn.Linear(model_dim, time_dim),
+            nn.Linear(dim, time_dim),
             nn.GELU(approximate="tanh"),
-            nn.Linear(time_dim, model_dim),
+            nn.Linear(time_dim, dim),
         )
 
     def forward(self, time: NamedTensor["batch"]) -> NamedTensor["batch dim"]:
+        if self.use_fourier:
+            # Append extra dimension to time for proper matmul broadcasting
+            time = time[:, None]
         return self.time_embed(time)
 
 
@@ -367,13 +379,13 @@ class MaskConditionalTransformer(nn.Module):
         super().__init__()
         self.num_layers = num_layers
 
-        self.time_embed = TimeEmbedding(model_dim, embed_name="sine")
+        self.time_embed = TimeEmbedding(model_dim)
         self.pos_embed = LearnedAbsolutePositionalEmbedding(model_dim, max_seq_len) \
             if use_abs_pos_embed else None
         # self.pos_embed = FixedPositionalEmbedding(model_dim)
         
         # 2x b/c of self-conditioning concat of input and condition signal
-        self.in_proj = nn.Sequential(nn.Linear(2 * embed_dim, model_dim))
+        self.in_proj = nn.Linear(2 * embed_dim, model_dim)
         self.blocks = nn.ModuleList([
             ParallelEncoderBlock(
                 model_dim,
@@ -406,7 +418,6 @@ class MaskConditionalTransformer(nn.Module):
             prev_embeds (p): Previous predicted embeddings for self-conditioning.
         """
         time_embeds = rearrange(self.time_embed(time), "... d -> ... 1 d")
-        # Self-conditioning
         cond_embeds = self.in_proj(torch.concat([noisy_embeds, prev_embeds], dim=-1))
         if self.pos_embed:
             pos_embeds = self.pos_embed(cond_embeds)
