@@ -222,7 +222,7 @@ if __name__ == "__main__":
 
     # Initialize model and optimizer
     embed_mat, embed_dim = layers.auto_extract_embed_mat(config.model.embed_model_name)
-    inner_model = layers.TransformerEncoder(
+    inner_model = layers.MaskConditionalTransformer(
         embed_dim=config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
         model_dim=config.model.model_dim,
         max_seq_len=config.model.seq_len,

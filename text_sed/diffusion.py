@@ -20,6 +20,32 @@ NamedTensor = Literal  # **Naive** named tensor
 Generator = NewType("Generator", torch.Generator)
 
 
+# Loss functions
+
+
+def cross_entropy_loss(
+    logits: Tensor,
+    targets: Tensor,
+    z_loss: Optional[float] = 0.0,
+) -> float:
+    """Mesh-transformer-jax style cross entropy loss.
+    Args:
+        logits: The unnormalized label scores.
+        targets: The ground truth labels. These should be one-hot encoded.
+    """
+    logits -= torch.max(logits, dim=-1, keepdim=True)[0]
+    one_hot_targets = F.one_hot(targets, num_classes=logits.shape[-1])
+    predicted_logits = torch.sum(one_hot_targets * logits, dim=-1)
+    loss = -predicted_logits + torch.logsumexp(logits, dim=-1)
+    # Add the auxiliary z-loss term
+    loss += torch.mean(z_loss * (1e-4 * torch.square(torch.logsumexp(logits, dim=-1))))
+    loss = reduce(loss, "b ... -> 1", "mean")[0]
+    # Compute the fraction of correct predictions per batch:
+    correct = (torch.argmax(logits, dim=-1) == targets).float()
+    correct = reduce(correct, "b ... -> 1", "mean")[0]
+    return dict(loss=loss, correct=correct)
+
+
 # Noise Schedules
 # Reference: https://github.com/openai/improved-diffusion/blob/main/improved_diffusion/gaussian_diffusion.py
 # @ unixpickle 🤘🥒
@@ -98,7 +124,6 @@ def ddim_step(
     time_now: Tensor,  # t
     time_next: Tensor,  # t - 1
     schedule: Callable,
-    scale: float = 1.0,
 ) -> Tensor:  # xₜ₋₁
     """Denoising diffusion implicit model step with η = 0. Estimates x₀ at
     time_next with the DDIM updating rule.
@@ -113,7 +138,6 @@ def ddim_step(
     """
     # TODO: Remove unicode characters after coming up with good var names.
     xₜ, x̃ₒ = noisy_inputs, pred_inputs
-    x̃ₒ = x̃ₒ.clamp(-scale, scale)
     ᾱₜ, ᾱₙ = schedule(time_now), schedule(time_next)  # ᾱₙ = ᾱₜ₋₁
     ϵ = (xₜ - torch.sqrt(ᾱₜ) * x̃ₒ) * torch.rsqrt(1 - ᾱₜ)
     # Next estimate (xₙ := xₜ₋₁)
@@ -127,7 +151,6 @@ def ddpm_step(
     time_now: Tensor,      # t
     time_next: Tensor,     # t - 1
     schedule: Callable,
-    scale: float = 1.0,
 ) -> Tensor:               # xₜ₋₁
     """Denoising diffusion implicit model step with η = 1. Estimates x₀ at
     time_next with the DDPM updating rule.
@@ -135,16 +158,14 @@ def ddpm_step(
     References:
     - Ho et al. "Denoising Diffusion Probabilistic Models". 2020.
         https://arxiv.org/abs/2006.11239
-    - Clamping Trick (see footnote 6 in the paper):
-        Li et al. "Diffusion-LM Improves Controllable Text Generation". 2022
     """
     xₜ, x̃ₒ = noisy_inputs, pred_inputs
-    x̃ₒ = x̃ₒ.clamp(-scale, scale)
     γₜ = schedule(time_now)
     ᾱₜ = γₜ / schedule(time_next)
     σₜ = torch.sqrt(1 - ᾱₜ)
     z = torch.randn_like(σₜ)
     ϵ = (xₜ - torch.sqrt(γₜ) * x̃ₒ) * torch.rsqrt(1 - γₜ)
+    # Next estimate (xₙ := xₜ₋₁)
     xₙ = torch.rsqrt(ᾱₜ) * (xₜ - ((1 - ᾱₜ) * torch.rsqrt(1 - γₜ)) * ϵ) + σₜ * z
     return xₙ
 
@@ -172,29 +193,6 @@ def corrupt(
     signal_rate = utils.append_dims(signal_rate, inputs.ndim)
     noise_rate = utils.append_dims(noise_rate, inputs.ndim)
     return signal_rate * inputs + noise_rate * noise
-
-
-def cross_entropy_loss(
-    logits: Tensor,
-    targets: Tensor,
-    z_loss: Optional[float] = 0.0,
-) -> float:
-    """Mesh-transformer-jax style cross entropy loss.
-    Args:
-        logits: The unnormalized label scores.
-        targets: The ground truth labels. These should be one-hot encoded.
-    """
-    logits -= torch.max(logits, dim=-1, keepdim=True)[0]
-    one_hot_targets = F.one_hot(targets, num_classes=logits.shape[-1])
-    predicted_logits = torch.sum(one_hot_targets * logits, dim=-1)
-    loss = -predicted_logits + torch.logsumexp(logits, dim=-1)
-    # Add the auxiliary z-loss term
-    loss += torch.mean(z_loss * (1e-4 * torch.square(torch.logsumexp(logits, dim=-1))))
-    loss = reduce(loss, "b ... -> 1", "mean")[0]
-    # Compute the fraction of correct predictions per batch:
-    correct = (torch.argmax(logits, dim=-1) == targets).float()
-    correct = reduce(correct, "b ... -> 1", "mean")[0]
-    return dict(loss=loss, correct=correct)
 
 
 class TextSed(nn.Module):
@@ -240,28 +238,29 @@ class TextSed(nn.Module):
         inputs: NamedTensor["batch", "pos", "embed"],
         use_self_cond: Optional[bool] = True,
         z_loss: Optional[float] = 0.0,
+        mask: Optional[NamedTensor["batch", "pos"]] = None,
     ) -> NamedTensor["batch", "pos", "embed"]:
         """
         Args:
             - inputs: The input token sequence.
         """
-        batch_size = inputs.shape[0]
-
         # Discrete-to-continuous data embedding (token/word -> embedding)
         embeds = self.read_in(inputs)
 
-        # Select random timesteps and corrupt
+        # Reconstruct embeddings...
+        batch_size = embeds.shape[0]
+        # Select random timesteps
         time = torch.rand((batch_size,), device=embeds.device)
         noisy_embeds = corrupt(embeds, time, schedule=self.noise_schedule)
-
         # Compute self-conditioning estimate
-        cond_embeds = torch.zeros_like(noisy_embeds, dtype=noisy_embeds.dtype)
+        prev_embeds = torch.zeros_like(noisy_embeds, dtype=noisy_embeds.dtype)
         if use_self_cond and random.random() > 0.5:
             with torch.no_grad():
-                cond_embeds = self.model(noisy_embeds, cond_embeds, time).detach()
-
+                prev_embeds = self.model(
+                    noisy_embeds, prev_embeds, time=time).detach()
         # Predict embeddings
-        pred_embeds = self.model(noisy_embeds, self_cond=cond_embeds, time=time)
+        pred_embeds = self.model(noisy_embeds, prev_embeds, time=time)
+
         logits = self.read_out(pred_embeds)
 
         # Diffusion and Reconstruction loss
@@ -284,11 +283,13 @@ class TextSed(nn.Module):
         shape: Shape,
         num_steps: int,
         *,
-        sampler: Optional[Callable] = ddim_step,
+        sampler: Callable = ddim_step,
+        use_clamp: bool = False,
+        time_delta: float = 0.0,
+        device: Device = "cuda:0",
+        mask: Optional[NamedTensor["batch", "pos"]] = None,
         # conds: Optional[NamedTensor["batch", "pos", "embed"]] = None,
         # guide_scale: Optional[float] = None,
-        time_delta: Optional[float] = 0.0,
-        device: Optional[Device] = "cuda:0",
     ) -> NamedTensor:
         """p sampler
         Sampler for the reverse diffusion process (denoising).
@@ -298,6 +299,8 @@ class TextSed(nn.Module):
 
         Args:
             time_delta: Asymmetric time interval shift, t → (t - Δ)
+            use_clamp: Whether to clamp predicted embeddings to the range
+                [-1, 1] before each diffusion sampling step.
         """
         # Sample start embedding from the normal prior eₜ ~ qₜ
         eₜ = torch.randn(shape, device=device)
@@ -331,8 +334,13 @@ class TextSed(nn.Module):
             #     # ẽₒ = guide_scale * ũₒ
             # else:
             # Self-conditioned prediction using the previous predictions, ẽₒ
-            ẽₒ = self.model(eₜ, ẽₒ, time_now)
-
+            ẽₒ = self.model(eₜ, ẽₒ, time=time_now)
+            if use_clamp:
+                # Clamping Trick (see footnote 6 in the paper):
+                #   The model additionally maps the predicted vector fθ(xₜ, t) to
+                #   its nearest word embedding sequence. √√
+                # Li et al. "Diffusion-LM Improves Controllable Text Generation". 2022
+                ẽₒ = torch.clamp(ẽₒ, -1.0, 1.0)
             # Estimate embeds at time_next eₜ₋₁
             eₜ = sampler(eₜ, ẽₒ, time_now, time_next, self.noise_schedule)
 

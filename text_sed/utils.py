@@ -11,7 +11,8 @@ import transformers
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import BatchSampler, RandomSampler
 
-from .layers import LearnedPositionEmbedding
+from .layers import LearnedAbsolutePositionalEmbedding
+
 
 Shape = NewType("Shape", Tuple[int, ...])
 Tensor = NewType("Tensor", torch.Tensor)
@@ -51,7 +52,7 @@ def get_grouped_params(
     weight_decay: float,
     whitelist_weight_modules: Tuple[torch.nn.Module] = (torch.nn.Linear, ),
     blacklist_weight_modules: Tuple[torch.nn.Module] = (
-        torch.nn.LayerNorm, torch.nn.Embedding, LearnedPositionEmbedding)
+        torch.nn.LayerNorm, torch.nn.Embedding, LearnedAbsolutePositionalEmbedding)
 ):
     """Removes weight decay from parameters with names containing any of the
     strings in `no_decay`.

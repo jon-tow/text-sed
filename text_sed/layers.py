@@ -19,9 +19,46 @@ Generator = NewType("Generator", torch.Generator)
 
 def l2norm(t, groups = 1):
     """lucid's l2norm"""
-    t = rearrange(t, '... (g d) -> ... g d', g = groups)
-    t = F.normalize(t, p = 2, dim = -1)
+    t = rearrange(t, '... (g d) -> ... g d', g=groups)
+    t = F.normalize(t, p=2, dim=-1)
     return rearrange(t, '... g d -> ... (g d)')
+
+
+class ConditionScaleAndBias(nn.Module):
+    """FiLM-style conditioning: https://distill.pub/2018/feature-wise-transformations/"""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.conditioner = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(dim, 2 * dim),
+        )
+
+    def forward(
+        self,
+        inputs: NamedTensor["batch", "pos", "dim"],
+        conds: NamedTensor["batch"],
+    ) -> NamedTensor["batch", "pos", "dim"]:
+        scale, bias = torch.chunk(self.conditioner(conds), chunks=2, dim=-1)
+        return (1 + scale) * inputs + bias
+
+
+# Word/Token Embedding Layers
+
+
+def auto_extract_embed_mat(
+    model_name: str = "bert-base-uncased",
+) -> Tuple[NamedTensor["vocab", "embed"], int]:
+    """Extracts a pre-trained word embedding lookup matrix, E ϵ Rᴰˣⱽ, from the
+    specified model.
+    """
+    # Extract the pre-trained word embedding lookup table.
+    embed_model = transformers.AutoModel.from_pretrained(model_name)
+    embeddings = embed_model.get_input_embeddings()
+    embed_mat = embeddings.get_parameter("weight").detach()
+    embed_dim = embeddings.embedding_dim
+    del embed_model
+    return embed_mat, embed_dim
 
 
 class PretrainedEmbedding(nn.Module):
@@ -69,41 +106,7 @@ class PretrainedUnEmbedding(nn.Module):
         return self.unembed(x)
 
 
-class ConditionScaleAndBias(nn.Module):
-    """FiLM-style conditioning: https://distill.pub/2018/feature-wise-transformations/"""
-
-    def __init__(self, dim: int):
-        super().__init__()
-        self.conditioner = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(dim, 2 * dim),
-        )
-
-    def forward(
-        self,
-        inputs: NamedTensor["batch", "pos", "dim"],
-        conds: NamedTensor["batch"],
-    ) -> NamedTensor["batch", "pos", "dim"]:
-        scale, bias = torch.chunk(self.conditioner(conds), chunks=2, dim=-1)
-        return (1 + scale) * inputs + bias
-
-
-# Embedding Layers
-
-
-def auto_extract_embed_mat(
-    model_name: str = "bert-base-uncased",
-) -> Tuple[NamedTensor["vocab", "embed"], int]:
-    """Extracts a pre-trained word embedding lookup matrix, E ϵ Rᴰˣⱽ, from the
-    specified model.
-    """
-    # Extract the pre-trained word embedding lookup table.
-    embed_model = transformers.AutoModel.from_pretrained(model_name)
-    embeddings = embed_model.get_input_embeddings()
-    embed_mat = embeddings.get_parameter("weight").detach()
-    embed_dim = embeddings.embedding_dim
-    del embed_model
-    return embed_mat, embed_dim
+# Position Embedding Layers
 
 
 def rotate_half(x):
@@ -112,7 +115,7 @@ def rotate_half(x):
 
 
 @torch.jit.script
-def apply_rotary_position_embedding(
+def apply_rotary_positional_embedding(
     x: torch.Tensor,
     freqs: torch.Tensor,
     seq_dim: int = -2,
@@ -122,7 +125,7 @@ def apply_rotary_position_embedding(
     return (x * torch.cos(freqs)) + (rotate_half(x) * torch.sin(freqs))
 
 
-class RotaryPositionEmbedding(nn.Module):
+class RotaryPositionalEmbedding(nn.Module):
     def __init__(self, dim: int, max_period: int = 10_000):
         super().__init__()
         inv_freq = 1. / (max_period ** (torch.arange(0, dim, 2).float() / dim))
@@ -135,7 +138,7 @@ class RotaryPositionEmbedding(nn.Module):
         return torch.cat((freqs, freqs), dim=-1).to(x.device)
 
 
-def fixed_position_embedding(
+def fixed_positional_embedding(
     dim: int,
     num_pos: int,
     max_period: int = 10_000,
@@ -145,7 +148,7 @@ def fixed_position_embedding(
     return torch.sin(sinusoid), torch.cos(sinusoid)
 
 
-class FixedPositionEmbedding(nn.Module):
+class FixedPositionalEmbedding(nn.Module):
     def __init__(self, dim: int, max_period: Optional[int] = 10_000):
         super().__init__()
         self.dim = dim
@@ -157,7 +160,7 @@ class FixedPositionEmbedding(nn.Module):
         seq_dim: Optional[int] = -2,
     ) -> NamedTensor["...", "pos", "dim"]:
         """Returns the sinuosidal position embeddings for the given input."""
-        sincos = fixed_position_embedding(
+        sincos = fixed_positional_embedding(
             self.dim,
             num_pos=input.shape[seq_dim],
             max_period=self.max_period,
@@ -165,7 +168,7 @@ class FixedPositionEmbedding(nn.Module):
         return torch.concat([sincos[0], sincos[1]], dim=-1).to(input.device)
 
 
-class LearnedPositionEmbedding(nn.Module):
+class LearnedAbsolutePositionalEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len, init_scale=1.0):
         super().__init__()
         self.max_seq_len = max_seq_len
@@ -188,6 +191,9 @@ class LearnedPositionEmbedding(nn.Module):
             f"feeding a sequence that's longer than the context length n_ctx={self.dim}."
         )
         return self.weight[start_pos:end_pos]
+
+
+# Time Embedding Layers
 
 
 class RandomFourierEmbedding(nn.Module):
@@ -222,7 +228,7 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 
 class TimeEmbedding(nn.Module):
-    def __init__(self, model_dim: int, time_dim: Optional[int] = None, embed_name: str = "fourier"):
+    def __init__(self, model_dim: int, time_dim: Optional[int] = None, embed_name: str = "sine"):
         super().__init__()
         time_dim = 4 * model_dim if time_dim is None else time_dim
         embed = RandomFourierEmbedding(model_dim, time_dim) if embed_name == "fourier" else \
@@ -291,7 +297,7 @@ class ParallelEncoderBlock(nn.Module):
         self.norm = nn.LayerNorm(model_dim)
 
         rotary_embed_dim = max(head_dim // 2 if rotary_dim is None else rotary_dim, 32)
-        self.rotary_pos_embed = RotaryPositionEmbedding(rotary_embed_dim) if use_rotary else None
+        self.rotary_pos_embed = RotaryPositionalEmbedding(rotary_embed_dim) if use_rotary else None
         self.conditioner = ConditionScaleAndBias(model_dim) if use_conditioner else None
 
         # Fused input projection: ((Wᵢq, Wᵢᵏ, Wᵢᵛ), (W1, W2))
@@ -303,7 +309,7 @@ class ParallelEncoderBlock(nn.Module):
 
         # Output projections
         self.attn_proj = nn.Linear(num_heads * head_dim, model_dim, bias=False)
-        self.ff_proj = nn.Linear(ff_mult * model_dim, model_dim, bias=False)
+        self.ff_proj = nn.Linear(ff_mult * model_dim, model_dim, bias=True)
 
     def forward(
         self,
@@ -329,21 +335,21 @@ class ParallelEncoderBlock(nn.Module):
             q_left, q_right = q[..., :rot_dim], q[..., rot_dim:]
             k_left, k_right = k[..., :rot_dim], k[..., rot_dim:]
             
-            q_left = apply_rotary_position_embedding(q_left, pos_embeds)
-            k_left = apply_rotary_position_embedding(k_left, pos_embeds)
+            q_left = apply_rotary_positional_embedding(q_left, pos_embeds)
+            k_left = apply_rotary_positional_embedding(k_left, pos_embeds)
 
             k = torch.cat([k_left, k_right], dim=-1)
             q = torch.cat([q_left, q_right], dim=-1)
         attn = multihead_attn(q, k, v, scale=self.scale)
         concat = merge_heads(attn)  # [..., pos, (num_heads * head_dim)]
 
-        # Output projection: [..., pos, model]
+        # Output projection: [..., pos, model_dim]
         attn_out = self.attn_proj(concat)
         ff_out = self.ff_proj(ff * F.gelu(ff_gate, approximate="tanh"))
         return inputs + attn_out + ff_out
 
 
-class TransformerEncoder(nn.Module):
+class MaskConditionalTransformer(nn.Module):
     def __init__(
         self,
         embed_dim: int,
@@ -354,6 +360,7 @@ class TransformerEncoder(nn.Module):
         num_heads: Optional[int] = 16,
         num_layers: Optional[int] = 12,
         ff_mult: Optional[int] = 4,
+        use_abs_pos_embed: bool = False,
         use_rotary: bool = True,
         rotary_dim: Optional[int] = None,
     ):
@@ -361,8 +368,9 @@ class TransformerEncoder(nn.Module):
         self.num_layers = num_layers
 
         self.time_embed = TimeEmbedding(model_dim, embed_name="sine")
-        # self.pos_embed = LearnedPositionEmbedding(model_dim, max_seq_len)
-        # self.pos_embed = FixedPositionEmbedding(model_dim)
+        self.pos_embed = LearnedAbsolutePositionalEmbedding(model_dim, max_seq_len) \
+            if use_abs_pos_embed else None
+        # self.pos_embed = FixedPositionalEmbedding(model_dim)
         
         # 2x b/c of self-conditioning concat of input and condition signal
         self.in_proj = nn.Sequential(nn.Linear(2 * embed_dim, model_dim))
@@ -385,15 +393,26 @@ class TransformerEncoder(nn.Module):
     
     def forward(
         self,
-        inputs: NamedTensor["batch", "pos", "dim"],
-        self_cond: NamedTensor["batch", "pos", "dim"],
+        # embeds: NamedTensor["batch", "pos", "dim"],
+        noisy_embeds: NamedTensor["batch", "pos", "dim"],
+        prev_embeds: NamedTensor["batch", "pos", "dim"],
         time: NamedTensor["batch"],
+        cond_mask: Optional[NamedTensor["batch", "pos"]] = None,
     ) -> NamedTensor["batch", "pos", "embed"]:
-        cond_embeds = self.in_proj(torch.concat([inputs, self_cond], dim=-1))
-        # pos_embeds = self.pos_embed(cond_embeds)
+        """
+        Args:
+            embeds (c): Token embeddings for clean positions.
+            noisy_embeds (x): Corrupted `embeds` embeddings.
+            prev_embeds (p): Previous predicted embeddings for self-conditioning.
+        """
         time_embeds = rearrange(self.time_embed(time), "... d -> ... 1 d")
-        hiddens = cond_embeds # + pos_embeds
+        # Self-conditioning
+        cond_embeds = self.in_proj(torch.concat([noisy_embeds, prev_embeds], dim=-1))
+        if self.pos_embed:
+            pos_embeds = self.pos_embed(cond_embeds)
+            cond_embeds += pos_embeds
+        hidden_states = cond_embeds
         for block in self.blocks:
-            hiddens = block(hiddens, time_embeds)
-        hiddens = self.out_proj(hiddens)
-        return self.final_norm(hiddens)
+            hidden_states = block(hidden_states, time_embeds)
+        hidden_states = self.out_proj(hidden_states)
+        return self.final_norm(hidden_states)
