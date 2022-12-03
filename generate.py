@@ -1,11 +1,9 @@
 import argparse
 import logging
 import os
-import random
 import time
 from typing import *
 
-import numpy as np
 import omegaconf as oc
 import torch
 import transformers
@@ -30,6 +28,7 @@ def generate(
         num_steps=config.model.num_gen_steps,
         sampler=diffusion.get_sampler(config.model.sampler),
         time_delta=config.model.time_delta,
+        # use_clamp=False,
         device=device,
     )
     samples = tokenizer.batch_decode(samples, skip_special_tokens=True)
@@ -43,8 +42,8 @@ def generate(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--checkpoint_path", type=str, default=None)
+    parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--time_delta", type=float, default=None)
     parser.add_argument("--num_samples", type=int, default=8)
     parser.add_argument("--seed", type=int, default=8)
@@ -65,7 +64,7 @@ if __name__ == "__main__":
     utils.set_seed(config.seed, use_device_specific_seeds=True)
 
     # Initialize tokenizer - turn off HuggingFace parallelism warnings
-    logger.info("⏳ Loading tokenizer...") 
+    logger.info("⏳ Loading tokenizer...")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         config.model.embed_model_name,
@@ -88,13 +87,17 @@ if __name__ == "__main__":
         bottleneck_dim=config.model.bottleneck_dim,
     )
 
-    logger.info(f"⏳ Loading checkpoint from {config.train.checkpoint_path}") 
+    logger.info(f"⏳ Loading checkpoint from {config.train.checkpoint_path}")
     checkpoint = torch.load(config.train.checkpoint_path)
-    diff.load_state_dict(checkpoint, strict=True)
+    diff.load_state_dict(checkpoint['model'], strict=True)
     # Move model to GPU if available before loading optimizer state
     if torch.cuda.is_available():
         diff.cuda()
 
-    shape = (args.num_samples, config.data.max_seq_len, embed_dim)
-    logger.info("🏁 Starting generation...") 
+    shape = (
+        config.train.num_samples,
+        config.model.max_gen_len,
+        config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
+    )
+    logger.info("🏁 Starting generation...")
     generate(config, diff, shape, tokenizer, device=args.device)

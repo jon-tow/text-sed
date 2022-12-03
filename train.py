@@ -7,7 +7,6 @@ import os
 from typing import *
 
 import datasets
-import numpy as np
 import omegaconf as oc
 import torch
 import torch.distributed as dist
