@@ -29,7 +29,7 @@ optimizer:
   max_grad_norm: 1.0
 
 train:
-  batch_size: 256
+  batch_size: 32
   max_steps: 2000000  # 2e6
   eval_every: 1000
   log_every: 100
@@ -41,7 +41,7 @@ train:
   dtype: bfloat16
 
 valid:
-  batch_size: 256
+  batch_size: 32
   max_steps: 1000
 
 data:
@@ -56,5 +56,5 @@ data:
 logging:
   use_wandb: true
   wandb_id: null
-  wandb_entity: null
+  wandb_entity: "jon-tow"
   wandb_project: ${name}

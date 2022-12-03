@@ -338,7 +338,7 @@ class TextSed(nn.Module):
             if use_clamp:
                 # Clamping Trick (see footnote 6 in the paper):
                 #   The model additionally maps the predicted vector fθ(xₜ, t) to
-                #   its nearest word embedding sequence. √√
+                #   its nearest word embedding sequence.
                 # Li et al. "Diffusion-LM Improves Controllable Text Generation". 2022
                 ẽₒ = torch.clamp(ẽₒ, -1.0, 1.0)
             # Estimate embeds at time_next eₜ₋₁
