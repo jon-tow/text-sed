@@ -454,3 +454,62 @@ class MaskConditionalTransformer(nn.Module):
             hidden_states = block(hidden_states, time_embeds)
         hidden_states = self.out_proj(hidden_states)
         return self.final_norm(hidden_states)
+
+
+# Masking helpers
+
+
+def get_prefix_mask(seq_len: int) -> Tensor:
+    """Returns a prefix mask of random length in [0, (seq_len / 2) - 1)."""
+    indices = torch.arange(0, seq_len)
+    prefix_len = random.randint(0, (seq_len // 2) - 1)
+    mask = (indices > prefix_len).float()
+    return mask
+
+
+def get_span_mask(seq_len: int, max_num_spans: int) -> Tensor:
+    """Returns a binary mask of span partitions for a sequence
+    where 1s indicates a span region who's tokens will be kept to
+    condition on and 0s indicate a span region who's tokens will be
+    masked out for corruption -> infilling.
+
+    Example:
+    >>> get_span_mask(10, 3)
+    >>> [1, 1, 1, 0, 0, 0, 0, 0, 1, 1],
+    
+    Handwritten Example:
+
+    >>> empty_mask  = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    >>> span_starts = [2, 6, 10]
+    >>> positions   = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    >>> span_mask   = [0, 0, 1, 1, 1, 1, 0, 0, 0, 0,  1,  1]  # Final Mask
+
+    Args:
+        seq_len (L): The length of the sequences.
+        max_num_spans (M): is the maximum number of spans.
+    
+
+    Reference: Strudel et al. "Self-Conditioned Embedding For Text Generation"
+        https://arxiv.org/abs/2211.04236
+    """
+    # TODO: Make this batched so each sequence has different random spans.
+    num_spans = random.randint(1, max_num_spans)  # (n)
+    if num_spans == 1:
+        # If there is only one span we just do unconditional generation and
+        # zero out all conditional positions for infilling.
+        return torch.zeros(seq_len, dtype=torch.bool)
+    # Sample uniformly without replacement n - 1 integers (i1, ..., i(n-1)) in [0, seq_len)
+    # and sort them in increasing order to satisfy the condition 0 < i1 < i2 < ... < i(n-1) < seq_len.
+    span_starts = sorted(random.sample(range(1, seq_len), num_spans - 1))  # (n - 1)
+    # m is defined using the even spans for conditioning (1) and odd spans for infilling (0).
+    mask = torch.zeros(seq_len, dtype=torch.bool)
+    i_span_starts = list(enumerate(span_starts))
+    for i, start in i_span_starts[:-1]:
+        if i % 2 == 0:
+            mask[start:span_starts[i+1]] = True
+    last_i, last_span_start = i_span_starts[-1]
+    if last_i % 2 == 0:
+        mask[last_span_start:] = True
+    # Flip mask with probability 0.5 so the positions from 0 to i1 aren't always False(0).
+    mask = mask if random.random() < 0.5 else ~mask
+    return mask
