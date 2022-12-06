@@ -18,6 +18,19 @@ NamedTensor = Literal  # __Naive__ named tensor
 Generator = NewType("Generator", torch.Generator)
 
 
+@torch.jit.script
+def fused_gelu(x):
+    return x * 0.5 * (1.0 + torch.erf(x / 1.41421))
+
+
+class FusedGELU(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: Tensor) -> Tensor:
+        return fused_gelu(x)
+
+
 def l2norm(t, groups=1):
     """lucid's l2norm"""
     t = rearrange(t, "... (g d) -> ... g d", g=groups)
@@ -252,7 +265,7 @@ class TimeEmbedding(nn.Module):
         self.time_embed = nn.Sequential(
             embed,
             nn.Linear(dim, time_dim),
-            nn.GELU(approximate="tanh"),
+            FusedGELU(),
             nn.Linear(time_dim, dim),
         )
 
@@ -314,6 +327,7 @@ class ParallelEncoderBlock(nn.Module):
         self.num_heads = num_heads
         self.scale = head_dim ** (-0.5)  # Scaled dot-product attention factor: 1 / √dₖ
         self.norm = nn.LayerNorm(model_dim)
+        self.gelu = FusedGELU()
 
         rotary_embed_dim = max(head_dim // 2 if rotary_dim is None else rotary_dim, 32)
         self.rotary_pos_embed = (
@@ -366,7 +380,7 @@ class ParallelEncoderBlock(nn.Module):
 
         # Output projection: [..., pos, model_dim]
         attn_out = self.attn_proj(concat)
-        ff_out = self.ff_proj(ff * F.gelu(ff_gate, approximate="tanh"))
+        ff_out = self.ff_proj(ff * self.gelu(ff_gate))
         return inputs + attn_out + ff_out
 
 
