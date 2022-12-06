@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, reduce
 
-from text_sed.layers import PretrainedEmbedding, PretrainedUnEmbedding
+from text_sed.layers import PretrainedEmbedding, PretrainedUnEmbedding, get_span_mask
 
 from . import utils
 
@@ -136,7 +136,6 @@ def ddim_step(
     - Clamping Trick (see footnote 6 in the paper):
         Li et al. "Diffusion-LM Improves Controllable Text Generation". 2022
     """
-    # TODO: Remove unicode characters after coming up with good var names.
     xₜ, x̃ₒ = noisy_inputs, pred_inputs
     ᾱₜ, ᾱₙ = schedule(time_now), schedule(time_next)  # ᾱₙ = ᾱₜ₋₁
     ϵ = (xₜ - torch.sqrt(ᾱₜ) * x̃ₒ) * torch.rsqrt(1 - ᾱₜ)
@@ -203,30 +202,34 @@ class TextSed(nn.Module):
         use_self_cond: bool = True,
         noise_schedule: Callable = get_noise_schedule("cosine"),
         bottleneck_dim: Optional[int] = None,
+        max_num_spans: int = 9,
     ):
         super().__init__()
         self.model = model
         self.use_self_cond = use_self_cond
         self.noise_schedule = noise_schedule
+        self.max_num_spans = max_num_spans
 
         _, embed_dim = embed_mat.shape
+        self.embed_dim = embed_dim
+        self.hidden_size = bottleneck_dim or embed_dim
 
         # Discrete-to-continuous fixed read-in matrix: E ϵ Rⱽˣᴰ
         self.read_in = nn.Sequential(
             PretrainedEmbedding(embed_mat, use_normalization=True),
             *[
                 # Bottleneck layer to shrink word embeddings: D → D'
-                nn.LayerNorm(embed_dim),
-                nn.Linear(embed_dim, bottleneck_dim)
+                nn.Linear(embed_dim, self.hidden_size),
+                # nn.LayerNorm(self.hidden_size),
             ] if bottleneck_dim else [nn.Identity()],
         )
-        # Continous-to-discrete learnable read-out matrix
+        # Continous-to-discrete learnable read-out matrix as an LM head
         self.read_out = nn.Sequential(
             *[
                 # "Add a linear output projection layer E′ which takes the output of
                 # the transformer y ∈ Rᴺˣᴰ and projects each element (yᵢ) 1 ≤ i ≤ N
                 # back to the same size as the word embeddings, `embed_dim`."
-                nn.Linear(bottleneck_dim, embed_dim),
+                nn.Linear(self.hidden_size, embed_dim),
                 nn.LayerNorm(embed_dim),
             ] if bottleneck_dim else [nn.Identity()],
             # Initalize read-out (R) to: Eᵀ ϵ Rᴰˣⱽ
@@ -244,11 +247,16 @@ class TextSed(nn.Module):
         Args:
             - inputs: The input token sequence.
         """
+        batch_size, seq_len = inputs.shape[0], inputs.shape[1]
+
         # Discrete-to-continuous data embedding (token/word -> embedding)
         embeds = self.read_in(inputs)
 
-        # Reconstruct embeddings...
-        batch_size = embeds.shape[0]
+        # Get masks
+        if mask is None:
+            mask = get_span_mask(seq_len, max_num_spans=self.max_num_spans)
+            mask = mask[None, :, None].to(embeds.device)
+
         # Select random timesteps
         time = torch.rand((batch_size,), device=embeds.device)
         noisy_embeds = corrupt(embeds, time, schedule=self.noise_schedule)
@@ -260,7 +268,7 @@ class TextSed(nn.Module):
                     noisy_embeds, prev_embeds, time=time).detach()
         # Predict embeddings
         pred_embeds = self.model(noisy_embeds, prev_embeds, time=time)
-
+        # Get lm-head logits
         logits = self.read_out(pred_embeds)
 
         # Diffusion and Reconstruction loss
@@ -278,7 +286,7 @@ class TextSed(nn.Module):
         )
 
     @torch.no_grad()
-    def sample(
+    def generate(
         self,
         shape: Shape,
         num_steps: int,
@@ -286,10 +294,10 @@ class TextSed(nn.Module):
         sampler: Callable = ddim_step,
         use_clamp: bool = False,
         time_delta: float = 0.0,
-        device: Device = "cuda:0",
+        conds: Optional[NamedTensor["batch", "pos", "embed"]] = None,
+        guide_scale: Optional[float] = None,
         mask: Optional[NamedTensor["batch", "pos"]] = None,
-        # conds: Optional[NamedTensor["batch", "pos", "embed"]] = None,
-        # guide_scale: Optional[float] = None,
+        device: Device = "cuda:0",
     ) -> NamedTensor:
         """p sampler
         Sampler for the reverse diffusion process (denoising).
@@ -303,9 +311,8 @@ class TextSed(nn.Module):
                 [-1, 1] before each diffusion sampling step.
         """
         # Sample start embedding from the normal prior eₜ ~ qₜ
-        eₜ = torch.randn(shape, device=device)
-        ẽₒ = torch.zeros_like(eₜ)
-
+        eₜ_prev = torch.randn(shape, device=device)
+        pred_eₒ = torch.zeros_like(eₜ_prev)
         for step in range(num_steps):
             # Get time for current and next states
             # (NOTE: (1 - ...) to process in reverse)
@@ -318,33 +325,33 @@ class TextSed(nn.Module):
                 device=device,
             )
 
-            # if guide_scale is not None and conds is None:  # Self-conditioning guidance
-            #     # Predict start embeds (eₒ) without self-cond
-            #     ũₒ = self.model(eₜ, torch.zeros_like(eₜ), time_now)
-            #     # Predict start embeds (eₒ) with self-conditiong
-            #     c̃ₒ = self.model(eₜ, ũₒ, time_now)
-            #     # Apply self-conditioning guidance
-            #     ẽₒ = guide_scale * c̃ₒ + (1.0 - guide_scale) * ũₒ 
-            # elif guide_scale is not None and conds is not None:  # Classifier Free Guidance
-            #     # Predict start embeds (eₒ) without self-cond
-            #     cond_embeds = self.read_in(conds)
-            #     ũₒ = self.model(eₜ, torch.zeros_like(eₜ), time_now)
-            #     # Predict start embeds (eₒ) with self-conditiong
-            #     c̃ₒ = self.model(eₜ, ũₒ, time_now)
-            #     # ẽₒ = guide_scale * ũₒ
-            # else:
-            # Self-conditioned prediction using the previous predictions, ẽₒ
-            ẽₒ = self.model(eₜ, ẽₒ, time=time_now)
+            if guide_scale is not None and conds is None:  # Self-conditioning guidance
+                # Predict start embeds (eₒ) without self-cond
+                ũₒ = self.model(eₜ_prev, torch.zeros_like(eₜ_prev), time_now)
+                # Predict start embeds (eₒ) with self-conditiong
+                c̃ₒ = self.model(eₜ_prev, ũₒ, time_now)
+                # Apply self-conditioning guidance
+                pred_eₒ = guide_scale * c̃ₒ + (1.0 - guide_scale) * ũₒ 
+            elif guide_scale is not None and conds is not None:  # Classifier Free Guidance
+                # Predict start embeds (eₒ) without self-cond
+                cond_embeds = self.read_in(conds)
+                ũₒ = self.model(eₜ_prev, torch.zeros_like(eₜ_prev), time_now)
+                # Predict start embeds (eₒ) with self-conditiong
+                c̃ₒ = self.model(eₜ_prev, ũₒ, time_now)
+                # ẽₒ = guide_scale * ũₒ
+            else:
+                # Self-conditioned prediction using the previous predictions, ẽₒ
+                pred_eₒ = self.model(eₜ_prev, pred_eₒ, time=time_now)
             if use_clamp:
                 # Clamping Trick (see footnote 6 in the paper):
                 #   The model additionally maps the predicted vector fθ(xₜ, t) to
                 #   its nearest word embedding sequence.
                 # Li et al. "Diffusion-LM Improves Controllable Text Generation". 2022
-                ẽₒ = torch.clamp(ẽₒ, -1.0, 1.0)
+                pred_eₒ = torch.clamp(pred_eₒ, -1.0, 1.0)
             # Estimate embeds at time_next eₜ₋₁
-            eₜ = sampler(eₜ, ẽₒ, time_now, time_next, self.noise_schedule)
+            eₜ_prev = sampler(eₜ_prev, pred_eₒ, time_now, time_next, self.noise_schedule)
 
         # Token decoding: continous embeddings to discrete tokens
-        logits = self.read_out(ẽₒ)
+        logits = self.read_out(pred_eₒ)
         tokens = torch.argmax(logits, -1)
         return tokens

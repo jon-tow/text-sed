@@ -1,4 +1,5 @@
 import math
+import random
 
 import transformers
 import torch
@@ -68,7 +69,7 @@ def auto_extract_embed_mat(
     """
     # Extract the pre-trained word embedding lookup table.
     embed_model = transformers.AutoModel.from_pretrained(model_name)
-    embeddings = embed_model.get_input_embeddings()
+    embeddings = embed_model.get_input_embeddings()  # Word embeddings layer.
     embed_mat = embeddings.get_parameter("weight").detach()
     embed_dim = embeddings.embedding_dim
     del embed_model
@@ -215,8 +216,9 @@ class LearnedAbsolutePositionalEmbedding(nn.Module):
 
 
 class RandomFourierEmbedding(nn.Module):
-    # Kat's Fourier embedding:
-    # https://github.com/crowsonkb/k-diffusion/blob/f4e99857772fc3a126ba886aadf795a332774878/k_diffusion/layers.py#L219
+    """Kat's Fourier embedding.
+    Reference: https://github.com/crowsonkb/k-diffusion/blob/f4e99857772fc3a126ba886aadf795a332774878/k_diffusion/layers.py#L219
+    """
     def __init__(self, in_features, out_features, std=1.0):
         super().__init__()
         assert out_features % 2 == 0
@@ -411,19 +413,17 @@ class MaskConditionalTransformer(nn.Module):
 
         # 2x b/c of self-conditioning concat of input and condition signal
         self.in_proj = nn.Linear(2 * embed_dim, model_dim)
-        self.blocks = nn.ModuleList(
-            [
-                ParallelEncoderBlock(
-                    model_dim,
-                    head_dim,
-                    num_heads,
-                    ff_mult=ff_mult,
-                    use_rotary=use_rotary,
-                    rotary_dim=rotary_dim,
-                )
-                for _ in range(num_layers)
-            ]
-        )
+        self.blocks = nn.ModuleList([
+            ParallelEncoderBlock(
+                model_dim,
+                head_dim,
+                num_heads,
+                ff_mult=ff_mult,
+                use_rotary=use_rotary,
+                rotary_dim=rotary_dim,
+            )
+            for _ in range(num_layers)
+        ])
         self.out_proj = nn.Sequential(
             nn.LayerNorm(model_dim),
             nn.Linear(model_dim, embed_dim),
@@ -436,9 +436,11 @@ class MaskConditionalTransformer(nn.Module):
         noisy_embeds: NamedTensor["batch", "pos", "dim"],
         prev_embeds: NamedTensor["batch", "pos", "dim"],
         time: NamedTensor["batch"],
-        cond_mask: Optional[NamedTensor["batch", "pos"]] = None,
     ) -> NamedTensor["batch", "pos", "embed"]:
         """
+        Conditioning tokens c are defined by a binary conditioning mask m set to
+        1 on conditioning positions and 0 on positions to be infilled.
+
         Args:
             embeds (c): Token embeddings for clean positions.
             noisy_embeds (x): Corrupted `embeds` embeddings.

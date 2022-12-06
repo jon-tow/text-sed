@@ -134,10 +134,10 @@ def train(
             logger.info("💬 Generating samples...")
             model.eval()
             # TODO: Add if-statement to unwrap DDP model
-            samples = model.module.sample(
+            samples = model.module.generate(
                 shape=(
                     config.train.num_samples,
-                    config.model.max_gen_len,
+                    config.model.seq_len,
                     config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
                 ),
                 num_steps=config.model.num_gen_steps,
@@ -258,7 +258,7 @@ if __name__ == "__main__":
     scaler = torch.cuda.amp.GradScaler(enabled=config.train.use_amp)
 
     logger.info(f"🏘 Inner Model: {inner_model}")
-    logger.info(f"👾 Parameter count: ~{format(utils.param_count(inner_model), ',')}")
+    logger.info(f"👾 Parameter count: ~{format(utils.param_count(diff), ',')}")
 
     # Load checkpoints if resuming training
     if config.train.checkpoint_path is not None:
@@ -289,6 +289,10 @@ if __name__ == "__main__":
     logger.info("🏁 Starting training...")
     try:
         train(config, diff, optimizer, lr_scheduler, scaler, tokenizer, step_state, run=run)
-    except KeyboardInterrupt:
-        logger.info("🛑 Training interrupted by user.")
-    run.finish()
+    except Exception as e:
+        logger.info(f"🛑 Training interrupted.\n{e}")
+        try:
+            if dist.is_initialized():
+                dist.destroy_process_group()
+        except KeyboardInterrupt:
+            os.system("kill -9 $(ps aux | grep train.py | grep -v grep | awk '{print $2}')") 

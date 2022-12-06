@@ -23,11 +23,12 @@ def generate(
 ):
     diff.eval()
     start_time = time.perf_counter()
-    samples = diff.sample(
+    samples = diff.generate(
         shape=shape,
         num_steps=config.model.num_gen_steps,
         sampler=diffusion.get_sampler(config.model.sampler),
         time_delta=config.model.time_delta,
+        guide_scale=config.model.guide_scale,
         # use_clamp=False,
         device=device,
     )
@@ -96,7 +97,7 @@ if __name__ == "__main__":
 
     shape = (
         config.train.num_samples,
-        config.model.max_gen_len,
+        config.model.seq_len,
         config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
     )
     logger.info("🏁 Starting generation...")
