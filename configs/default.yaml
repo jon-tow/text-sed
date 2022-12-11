@@ -12,9 +12,11 @@ model:
   seq_len: 32
   max_gen_len: 32
   scale: 1.0
+  guide_scale: null
   num_steps: 1000
   num_gen_steps: 1000
   ema_decay: 0.9999
+  ema_every: 10  # Update EMA every `ema_every` steps
   noise_schedule: cosine
   use_self_cond: true
   time_delta: 0.0
@@ -32,9 +34,10 @@ optimizer:
   max_grad_norm: 1.0
 
 train:
-  batch_size: 256
+  batch_size: 128
   max_steps: 500000
   eval_every: 1000
+  log_stats: false
   log_every: 100
   save_every: 10000
   sample_every: 1000
@@ -48,7 +51,7 @@ valid:
   max_steps: 1000
 
 data:
-  name: imdb
+  name: "data/roc_stories.py" # imdb
   subset_name: null
   train_name: train
   valid_name: test
@@ -58,6 +61,6 @@ data:
 
 logging:
   wandb_id: null
-  wandb_entity: ""
+  wandb_entity: "jon-tow"
   wandb_project: ${name}
   wandb_group: "Processes"

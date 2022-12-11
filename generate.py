@@ -16,20 +16,20 @@ logger = logging.getLogger(__name__)
 
 def generate(
     config: oc.DictConfig,
-    diff: torch.nn.Module,
+    model: torch.nn.Module,
     shape: Tuple[int, int, int],
     tokenizer: transformers.PreTrainedTokenizer,
     device: Optional[Union[torch.device, str]] = "cuda:0",
 ):
-    diff.eval()
+    model.eval()
     start_time = time.perf_counter()
-    samples = diff.generate(
+    samples = model.generate(
         shape=shape,
         num_steps=config.model.num_gen_steps,
         sampler=diffusion.get_sampler(config.model.sampler),
         time_delta=config.model.time_delta,
         guide_scale=config.model.guide_scale,
-        # use_clamp=False,
+        use_clamp=False,
         device=device,
     )
     samples = tokenizer.batch_decode(samples, skip_special_tokens=True)
@@ -75,13 +75,15 @@ if __name__ == "__main__":
 
     embed_mat, embed_dim = layers.auto_extract_embed_mat(config.model.embed_model_name)
     inner_model = layers.MaskConditionalTransformer(
-        embed_dim=config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
+        embed_dim=config.model.bottleneck_dim
+        if config.model.bottleneck_dim
+        else embed_dim,
         model_dim=config.model.model_dim,
         max_seq_len=config.model.seq_len,
         head_dim=config.model.head_dim,
         num_heads=config.model.num_heads,
     )
-    diff = diffusion.TextSed(
+    model = diffusion.TextSed(
         model=inner_model,
         embed_mat=embed_mat,
         noise_schedule=diffusion.get_noise_schedule(config.model.noise_schedule),
@@ -90,10 +92,11 @@ if __name__ == "__main__":
 
     logger.info(f"⏳ Loading checkpoint from {config.train.checkpoint_path}")
     checkpoint = torch.load(config.train.checkpoint_path)
-    diff.load_state_dict(checkpoint['model'], strict=True)
+    # Load EMA model state for inference
+    model.load_state_dict(checkpoint["model_ema"], strict=True)
     # Move model to GPU if available before loading optimizer state
     if torch.cuda.is_available():
-        diff.cuda()
+        model.cuda()
 
     shape = (
         config.train.num_samples,
@@ -101,4 +104,4 @@ if __name__ == "__main__":
         config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
     )
     logger.info("🏁 Starting generation...")
-    generate(config, diff, shape, tokenizer, device=args.device)
+    generate(config, model, shape, tokenizer, device=args.device)

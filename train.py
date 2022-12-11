@@ -1,9 +1,11 @@
 """
 Basic Usage:
-    torchrun --nproc_per_node=N train.py
+torchrun --nproc_per_node=N train.py
 """
 import argparse
+import copy
 import os
+import time
 from typing import *
 
 import datasets
@@ -12,15 +14,17 @@ import torch
 import torch.distributed as dist
 import tqdm
 import transformers
-import wandb
 
+import wandb
 from text_sed import diffusion, layers, slurm, utils
 
 
 def train(
     config: oc.DictConfig,
     model: torch.nn.Module,
+    model_ema: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    *,
     lr_scheduler: torch.optim.lr_scheduler._LRScheduler,
     scaler: torch.cuda.amp.GradScaler,
     tokenizer: transformers.PreTrainedTokenizer,
@@ -92,13 +96,19 @@ def train(
         scaler.step(optimizer)
         scaler.update()
         lr_scheduler.step()
+        if step % config.model.ema_every == 0:
+            utils.ema_update(model, model_ema, config.model.ema_decay)
         optimizer.zero_grad(set_to_none=True)
 
         # Log training stats
         if step % config.train.log_every == 0 and utils.is_main_process():
-            run.log({f"train/{k}": v for k, v in stats.items()}, step=step)
+            # run.log({f"train/{k}": v for k, v in stats.items()}, step=step)
+            run.log({f"train/loss": loss}, step=step)
             info = f"🎛 Step: {step}/{config.train.max_steps} "
-            info += f"| Loss: {loss:.5f} | LR: {lr_scheduler.get_last_lr()[0]:.6f}"
+            info += f"𑗔 Loss: {loss:.5f} "
+            info += f"𑗔 MSE Loss: {stats['loss_mse']:.5f} "
+            info += f"𑗔 Recon Loss: {stats['loss_recon']:.5f} "
+            info += f"𑗔 LR: {lr_scheduler.get_last_lr()[0]:.6f}"
             logger.info(info)
 
         # Evaluate and log the validation stats
@@ -114,43 +124,38 @@ def train(
             #     _, valid_stats = model(valid_inputs)
             # run.log({f"valid/{k}": v for k, v in valid_stats.items()}, step=step)
             # model.train()
-            # Save latest checkpoint
-            # if utils.is_main_process():
-            #     logger.info(f"💾 Saving latest checkpoint")
-            #     checkpoint = {
-            #         "model": model.module.state_dict(),
-            #         "optimizer": optimizer.state_dict(),
-            #         "lr_scheduler": lr_scheduler.state_dict(),
-            #         "scaler": scaler.state_dict(),
-            #         "step": step,
-            #         "config": config,
-            #     }
-            #     path = os.path.join(config.output_dir, f"latest.pth")
-            #     torch.save(checkpoint, path)
 
         # Generate samples
         is_sample_step = step % config.train.sample_every == 0 and step != 0
         if is_sample_step and utils.is_main_process():
+            model_ema.eval()
             logger.info("💬 Generating samples...")
-            model.eval()
-            # TODO: Add if-statement to unwrap DDP model
-            samples = model.module.generate(
-                shape=(
-                    config.train.num_samples,
-                    config.model.seq_len,
-                    config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
-                ),
+            shape = (
+                config.train.num_samples,
+                config.model.seq_len,
+                config.model.bottleneck_dim
+                if config.model.bottleneck_dim
+                else embed_dim,
+            )
+            start_time = time.perf_counter()
+            samples = model_ema.module.generate(
+                shape=shape,
                 num_steps=config.model.num_gen_steps,
                 sampler=diffusion.get_sampler(config.model.sampler),
                 time_delta=config.model.time_delta,
+                guide_scale=config.model.guide_scale,
+                use_clamp=False,
                 device=inputs.device,
             )
-            samples = tokenizer.batch_decode(samples, skip_special_tokens=True)
-            sample_log = "🎙 Samples: \n"
+            samples = tokenizer.batch_decode(samples, skip_secial_tokens=True)
+            sample_log = "💬 Generating samples..."
             for sample in samples:
-                sample_log += f"➜ {sample}\n"
+                sample_log += f"\n➜ {sample}"
             logger.info(sample_log)
-            model.train()
+            logger.info(
+                f"🕒 Generation took {time.perf_counter() - start_time:.2f} seconds."
+            )
+            model_ema.train()
 
         # Save checkpoints
         is_save_step = step % config.train.save_every == 0 and step != 0
@@ -158,6 +163,7 @@ def train(
             logger.info(f"💾 Saving checkpoint for step {step}")
             checkpoint = {
                 "model": model.module.state_dict(),
+                "model_ema": model_ema.module.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "lr_scheduler": lr_scheduler.state_dict(),
                 "scaler": scaler.state_dict(),
@@ -188,7 +194,9 @@ if __name__ == "__main__":
     else:
         # Add timestamp to checkpoint dir name
         # TODO: There's probably a better way to do this...
-        oc.OmegaConf.update(config, "output_dir", f"{config.output_dir}-{utils.get_timestamp()}")
+        oc.OmegaConf.update(
+            config, "output_dir", f"{config.output_dir}-{utils.get_timestamp()}"
+        )
 
     os.makedirs(config.output_dir, exist_ok=True)
     if dist.is_initialized():
@@ -204,16 +212,17 @@ if __name__ == "__main__":
     run = None
     if utils.is_main_process():
         wandb.finish()  # Clear out any previous runs.
-        wandb_id = wandb.util.generate_id() if config.logging.wandb_id is None else \
-            config.logging.wandb_id
+        wandb_id = (
+            wandb.util.generate_id()
+            if config.logging.wandb_id is None
+            else config.logging.wandb_id
+        )
         run = wandb.init(
             project=config.logging.wandb_project,
             entity=config.logging.wandb_entity,
             name=f"{config.name}-{wandb_id}",
             config=utils.flatten_dict(oc.OmegaConf.to_container(config)),
             id=wandb_id,
-            # group=config.logging.wandb_group,
-            # job_type="train",
         )
 
     utils.set_seed(config.seed, use_device_specific_seeds=True)
@@ -230,20 +239,22 @@ if __name__ == "__main__":
     # Initialize model and optimizer
     embed_mat, embed_dim = layers.auto_extract_embed_mat(config.model.embed_model_name)
     inner_model = layers.MaskConditionalTransformer(
-        embed_dim=config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
+        embed_dim=config.model.bottleneck_dim
+        if config.model.bottleneck_dim
+        else embed_dim,
         model_dim=config.model.model_dim,
         max_seq_len=config.model.seq_len,
         head_dim=config.model.head_dim,
         num_heads=config.model.num_heads,
     )
-    diff = diffusion.TextSed(
+    model = diffusion.TextSed(
         model=inner_model,
         embed_mat=embed_mat,
         noise_schedule=diffusion.get_noise_schedule(config.model.noise_schedule),
         bottleneck_dim=config.model.bottleneck_dim,
     )
     optimizer = torch.optim.AdamW(
-        utils.get_grouped_params(diff, config.optimizer.weight_decay),
+        utils.get_grouped_params(model, config.optimizer.weight_decay),
         lr=config.optimizer.lr,
         weight_decay=config.optimizer.weight_decay,
         betas=tuple(config.optimizer.betas),
@@ -258,16 +269,28 @@ if __name__ == "__main__":
     scaler = torch.cuda.amp.GradScaler(enabled=config.train.use_amp)
 
     logger.info(f"🏘 Inner Model: {inner_model}")
-    logger.info(f"👾 Parameter count: ~{format(utils.param_count(diff), ',')}")
+    logger.info(f"👾 Parameter count: ~{format(utils.param_count(model), ',')}")
+
+    if dist.is_initialized():
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            find_unused_parameters=True,
+        )
+        dist.barrier()
+    # Init the model EMA after DDP to avoid state dict key mismatches in update
+    model_ema = copy.deepcopy(model)
 
     # Load checkpoints if resuming training
     if config.train.checkpoint_path is not None:
         logger.info(f"⏳ Loading checkpoint from {config.train.checkpoint_path}")
         checkpoint = torch.load(config.train.checkpoint_path)
-        diff.load_state_dict(checkpoint["model"], strict=True)
+        model.module.load_state_dict(checkpoint["model"], strict=True)
+        model_ema.module.load_state_dict(checkpoint["model_ema"], strict=True)
         # Move model to GPU if available before loading optimizer state
         if torch.cuda.is_available():
-            diff.cuda()
+            model.cuda()
         optimizer.load_state_dict(checkpoint["optimizer"])
         lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
         scaler.load_state_dict(checkpoint["scaler"])
@@ -275,24 +298,17 @@ if __name__ == "__main__":
     else:
         step_state = 0
         if torch.cuda.is_available():
-            diff.cuda()
-
-    if dist.is_initialized():
-        diff = torch.nn.parallel.DistributedDataParallel(
-            diff,
-            device_ids=[args.local_rank],
-            output_device=args.local_rank,
-            find_unused_parameters=True,
-        )
-        dist.barrier()
+            model.cuda()
 
     logger.info("🏁 Starting training...")
-    try:
-        train(config, diff, optimizer, lr_scheduler, scaler, tokenizer, step_state, run=run)
-    except Exception as e:
-        logger.info(f"🛑 Training interrupted.\n{e}")
-        try:
-            if dist.is_initialized():
-                dist.destroy_process_group()
-        except KeyboardInterrupt:
-            os.system("kill -9 $(ps aux | grep train.py | grep -v grep | awk '{print $2}')") 
+    train(
+        config,
+        model,
+        model_ema,
+        optimizer,
+        lr_scheduler=lr_scheduler,
+        scaler=scaler,
+        tokenizer=tokenizer,
+        step_state=step_state,
+        run=run,
+    )

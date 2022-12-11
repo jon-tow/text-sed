@@ -6,6 +6,7 @@ from typing import *
 
 import datasets
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 import transformers
 from torch.utils.data import DataLoader
@@ -13,21 +14,44 @@ from torch.utils.data.sampler import BatchSampler, RandomSampler
 
 from .layers import LearnedAbsolutePositionalEmbedding
 
-
 logger = logging.getLogger(__name__)
 
 
 Shape = NewType("Shape", Tuple[int, ...])
 
 
+# Exponential Moving Average
+
+
+@torch.no_grad()
+def ema_update(model: nn.Module, ema_model: nn.Module, decay: float = 0.999) -> None:
+    """Updates the moving average of the model parameters.
+    Reference: https://github.com/crowsonkb/k-diffusion/blob/5b3af030dd83e0297272d861c19477735d0317ec/k_diffusion/utils.py#L86
+    """
+    model_params = dict(model.named_parameters())
+    ema_params = dict(ema_model.named_parameters())
+    assert model_params.keys() == ema_params.keys()
+    for name, param in model.named_parameters():
+        ema_params[name].mul_(decay).add_(param, alpha=1 - decay)
+    
+    model_buffers = dict(model.named_buffers())
+    ema_buffers = dict(ema_model.named_buffers())
+    assert model_buffers.keys() == ema_buffers.keys()
+    for name, buffer in model.named_buffers():
+        ema_buffers[name].copy_(buffer)
+
+
 def get_timestamp() -> str:
     import datetime
+
     return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def set_seed(seed: int, use_device_specific_seeds: bool = False):
     import random
+
     import numpy as np
+
     if use_device_specific_seeds:
         seed = get_rank() + seed
     torch.manual_seed(seed)
@@ -57,9 +81,12 @@ def param_count(model: torch.nn.Module) -> int:
 def get_grouped_params(
     model: torch.nn.Module,
     weight_decay: float,
-    whitelist_weight_modules: Tuple[torch.nn.Module] = (torch.nn.Linear, ),
+    whitelist_weight_modules: Tuple[torch.nn.Module] = (torch.nn.Linear,),
     blacklist_weight_modules: Tuple[torch.nn.Module] = (
-        torch.nn.LayerNorm, torch.nn.Embedding, LearnedAbsolutePositionalEmbedding)
+        torch.nn.LayerNorm,
+        torch.nn.Embedding,
+        LearnedAbsolutePositionalEmbedding,
+    ),
 ):
     """Removes weight decay from parameters with names containing any of the
     strings in `no_decay`.
@@ -69,17 +96,17 @@ def get_grouped_params(
     no_decay = set()
     for mn, m in model.named_modules():
         for pn, p in m.named_parameters():
-            fpn = '%s.%s' % (mn, pn) if mn else pn # full param name
+            fpn = "%s.%s" % (mn, pn) if mn else pn  # full param name
             # random note: because named_modules and named_parameters are recursive
             # we will see the same tensors p many many times. but doing it this way
             # allows us to know which parent module any tensor p belongs to...
-            if pn.endswith('bias'):
+            if pn.endswith("bias"):
                 # all biases will not be decayed
                 no_decay.add(fpn)
-            elif pn.endswith('weight') and isinstance(m, whitelist_weight_modules):
+            elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):
                 # weights of whitelist modules will be weight decayed
                 decay.add(fpn)
-            elif pn.endswith('weight') and isinstance(m, blacklist_weight_modules):
+            elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules):
                 # weights of blacklist modules will NOT be weight decayed
                 no_decay.add(fpn)
 
@@ -87,12 +114,23 @@ def get_grouped_params(
     param_dict = {pn: p for pn, p in model.named_parameters()}
     inter_params = decay & no_decay
     union_params = decay | no_decay
-    assert len(inter_params) == 0, "parameters %s made it into both decay/no_decay sets!" % (str(inter_params), )
-    assert len(param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" \
-                                                % (str(param_dict.keys() - union_params), )
+    assert (
+        len(inter_params) == 0
+    ), "parameters %s made it into both decay/no_decay sets!" % (str(inter_params),)
+    assert (
+        len(param_dict.keys() - union_params) == 0
+    ), "parameters %s were not separated into either decay/no_decay set!" % (
+        str(param_dict.keys() - union_params),
+    )
     optim_groups = [
-        {"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": weight_decay},
-        {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
+        {
+            "params": [param_dict[pn] for pn in sorted(list(decay))],
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": [param_dict[pn] for pn in sorted(list(no_decay))],
+            "weight_decay": 0.0,
+        },
     ]
     return optim_groups
 
