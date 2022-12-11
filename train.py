@@ -281,7 +281,7 @@ if __name__ == "__main__":
             find_unused_parameters=True,
         )
         dist.barrier()
-    # Init the model EMA after DDP to avoid state dict key mismatches in update
+    # Init the model EMA after DDP to avoid state dict key mismatches during updates
     model_ema = copy.deepcopy(model)
 
     # Load checkpoints if resuming training
@@ -290,7 +290,6 @@ if __name__ == "__main__":
         checkpoint = torch.load(config.train.checkpoint_path)
         model.module.load_state_dict(checkpoint["model"], strict=True)
         model_ema.module.load_state_dict(checkpoint["model_ema"], strict=True)
-        # Move model to GPU if available before loading optimizer state
         if torch.cuda.is_available():
             model.cuda()
         optimizer.load_state_dict(checkpoint["optimizer"])
