@@ -114,7 +114,8 @@ def train(
         # Evaluate and log the validation stats
         if step % config.train.eval_every == 0 and utils.is_main_process():
             logger.info(
-                "📊 Evaluating... WARNING: Evaluation is slow! Run evaluations on checkpoints instead."
+                "📊 Evaluating... "
+                "WARNING: Evaluation is slow! Run evaluations on checkpoints instead."
             )
             # model.eval()
             # TODO: The `BatchSampler` + `DataLoader` prepends an extra dimension to

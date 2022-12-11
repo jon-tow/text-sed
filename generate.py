@@ -73,9 +73,8 @@ if __name__ == "__main__":
 
     utils.set_seed(config.seed, use_device_specific_seeds=True)
 
-    # Initialize tokenizer - turn off HuggingFace parallelism warnings
     logger.info("⏳ Loading tokenizer...")
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"  # Turn off HF parallelism warnings
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         config.model.embed_model_name,
         use_fast=config.data.use_fast_tokenizer,
@@ -103,7 +102,6 @@ if __name__ == "__main__":
     checkpoint = torch.load(config.train.checkpoint_path)
     # Load EMA model state for inference
     model.load_state_dict(checkpoint["model_ema"], strict=True)
-    # Move model to GPU if available before loading optimizer state
     if torch.cuda.is_available():
         model.cuda()
 
