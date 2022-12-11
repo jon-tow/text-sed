@@ -51,7 +51,7 @@ valid:
   max_steps: 1000
 
 data:
-  name: "data/roc_stories.py" # imdb
+  name: "datasets/roc_stories.py" # imdb
   subset_name: null
   train_name: train
   valid_name: test

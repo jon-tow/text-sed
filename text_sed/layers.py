@@ -423,7 +423,7 @@ class MaskConditionalTransformer(nn.Module):
 
     def forward(
         self,
-        # embeds: NamedTensor["batch", "pos", "dim"],
+        # TODO: Update args for span(conditional)-masking
         noisy_embeds: NamedTensor["batch", "pos", "dim"],
         prev_embeds: NamedTensor["batch", "pos", "dim"],
         time: NamedTensor["batch"],
@@ -433,7 +433,7 @@ class MaskConditionalTransformer(nn.Module):
         1 on conditioning positions and 0 on positions to be infilled.
 
         Args:
-            embeds (c): Token embeddings for clean positions.
+            # embeds (c): Token embeddings for clean positions.
             noisy_embeds (x): Corrupted `embeds` embeddings.
             prev_embeds (p): Previous predicted embeddings for self-conditioning.
         """

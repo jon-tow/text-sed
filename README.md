@@ -11,6 +11,7 @@ pip install -e ".[dev, train]"
 ## TODOs
 
 * [ ] Add span masking and cfg for conditional generation.
+* [ ] Add EMA warmup.
 * [ ] Add Karras samplers.
 
 ## Appreciation

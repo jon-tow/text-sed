@@ -28,7 +28,7 @@ def cross_entropy_loss(
     targets: Tensor,
     z_loss: Optional[float] = 0.0,
 ) -> float:
-    """Mesh-transformer-jax style cross entropy loss.
+    """`mesh-transformer-jax` style cross entropy loss.
     Args:
         logits: The unnormalized label scores.
         targets: The ground truth labels. These should be one-hot encoded.
@@ -152,8 +152,7 @@ def ddpm_step(
     """Denoising diffusion implicit model step with η = 1. Estimates x₀ at
     time_next with the DDPM updating rule.
 
-    References:
-    - Ho et al. "Denoising Diffusion Probabilistic Models". 2020.
+    Reference: Ho et al. "Denoising Diffusion Probabilistic Models". 2020.
         https://arxiv.org/abs/2006.11239
     """
     xₜ, x̃ₒ = noisy_inputs, pred_inputs
@@ -178,8 +177,7 @@ def corrupt(
     """q sampler: q(xₜ | xₒ) ~ N(xₒ * √ᾱₜ, (1 - ᾱₜ)I)
     Arbitrary time q-sampler for forward diffusion processing (corruption).
 
-    Reference
-    - Ho et al. "Denoising Diffusion Probabilistic Models". 2020.
+    Reference: Ho et al. "Denoising Diffusion Probabilistic Models". 2020.
         https://arxiv.org/abs/2006.11239
     """
     noise = torch.randn_like(inputs)  # ϵ
@@ -243,7 +241,7 @@ class TextSed(nn.Module):
     ) -> NamedTensor["batch", "pos", "embed"]:
         """
         Args:
-            - inputs: The input token sequence.
+            inputs: The input token sequence.
         """
         batch_size, seq_len = inputs.shape[0], inputs.shape[1]
 
@@ -329,22 +327,24 @@ class TextSed(nn.Module):
                 c̃ₒ = self.model(eₜ_prev, ũₒ, time_now)
                 # Apply self-conditioning guidance
                 pred_eₒ = guide_scale * c̃ₒ + (1.0 - guide_scale) * ũₒ 
-            elif guide_scale is not None and conds is not None:  # Classifier Free Guidance
-                # Predict start embeds (eₒ) without self-cond
-                cond_embeds = self.read_in(conds)
-                ũₒ = self.model(eₜ_prev, torch.zeros_like(eₜ_prev), time_now)
-                # Predict start embeds (eₒ) with self-conditiong
-                c̃ₒ = self.model(eₜ_prev, ũₒ, time_now)
-                # ẽₒ = guide_scale * ũₒ
+            # elif guide_scale is not None and conds is not None:  # Classifier Free Guidance
+            #     # Predict start embeds (eₒ) without self-cond
+            #     cond_embeds = self.read_in(conds)
+            #     ũₒ = self.model(eₜ_prev, torch.zeros_like(eₜ_prev), time_now)
+            #     # Predict start embeds (eₒ) with self-conditiong
+            #     c̃ₒ = self.model(eₜ_prev, ũₒ, time_now)
+            #     pred_eₒ = guide_scale * ũₒ
             else:
                 # Self-conditioned prediction using the previous predictions, ẽₒ
                 pred_eₒ = self.model(eₜ_prev, pred_eₒ, time=time_now)
+
             if use_clamp:
                 # Clamping Trick (see footnote 6 in the paper):
                 #   The model additionally maps the predicted vector fθ(xₜ, t) to
                 #   its nearest word embedding sequence.
                 # Li et al. "Diffusion-LM Improves Controllable Text Generation". 2022
                 pred_eₒ = torch.clamp(pred_eₒ, -1.0, 1.0)
+
             # Estimate embeds at time_next eₜ₋₁
             eₜ_prev = sampler(eₜ_prev, pred_eₒ, time_now, time_next, self.noise_schedule)
 
