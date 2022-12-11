@@ -1,3 +1,12 @@
+"""
+Usage:
+python generate.py --checkpoint_path <path to checkpoint> \
+    --config <path to config> \
+    --time_delta <time delta> \
+    --num_samples <number of samples> \
+    --seed <random seed> \
+    --device <device to use>
+"""
 import argparse
 import logging
 import os
@@ -32,12 +41,12 @@ def generate(
         use_clamp=False,
         device=device,
     )
+    end_time = time.perf_counter()
     samples = tokenizer.batch_decode(samples, skip_special_tokens=True)
     sample_log = "💬 Generating samples..."
     for sample in samples:
         sample_log += f"\n➜ {sample}"
     logger.info(sample_log)
-    end_time = time.perf_counter()
     logger.info(f"🕒 Generation took {end_time - start_time:.2f} seconds.")
 
 

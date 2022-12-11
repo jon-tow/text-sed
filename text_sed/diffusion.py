@@ -119,10 +119,10 @@ def get_sampler(sampler_name: str, **kwargs) -> Callable:
 
 
 def ddim_step(
-    noisy_inputs: Tensor,  # xₜ
+    noisy_inputs: Tensor, # xₜ
     pred_inputs: Tensor,  # x̃₀
-    time_now: Tensor,  # t
-    time_next: Tensor,  # t - 1
+    time_now: Tensor,     # t
+    time_next: Tensor,    # t - 1
     schedule: Callable,
 ) -> Tensor:  # xₜ₋₁
     """Denoising diffusion implicit model step with η = 0. Estimates x₀ at
@@ -133,8 +133,6 @@ def ddim_step(
         https://arxiv.org/pdf/2010.02502.pdf
     - Lilian Weng.
         https://lilianweng.github.io/posts/2021-07-11-diffusion-models/#speed-up-diffusion-model-sampling
-    - Clamping Trick (see footnote 6 in the paper):
-        Li et al. "Diffusion-LM Improves Controllable Text Generation". 2022
     """
     xₜ, x̃ₒ = noisy_inputs, pred_inputs
     ᾱₜ, ᾱₙ = schedule(time_now), schedule(time_next)  # ᾱₙ = ᾱₜ₋₁
@@ -275,7 +273,6 @@ class TextSed(nn.Module):
         loss_mse = F.mse_loss(pred_embeds, target=embeds, reduction="mean")
         loss_recon = cross_entropy_loss(logits, targets=inputs, z_loss=z_loss)
         total_loss = loss_mse + loss_recon["loss"]
-
         return total_loss, utils.flatten_dict(
             dict(
                 total_loss=total_loss.item(),

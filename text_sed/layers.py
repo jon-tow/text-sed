@@ -32,13 +32,6 @@ class FusedGELU(nn.Module):
         return fused_gelu(x)
 
 
-def l2norm(t, groups=1):
-    """lucid's l2norm"""
-    t = rearrange(t, "... (g d) -> ... g d", g=groups)
-    t = F.normalize(t, p=2, dim=-1)
-    return rearrange(t, "... g d -> ... (g d)")
-
-
 class ConditionScaleAndBias(nn.Module):
     """FiLM-style conditioning: https://distill.pub/2018/feature-wise-transformations/"""
 
@@ -67,9 +60,9 @@ def auto_extract_embed_mat(
     """Extracts a pre-trained word embedding lookup matrix, E ϵ Rᴰˣⱽ, from the
     specified model.
     """
-    # Extract the pre-trained word embedding lookup table.
+    # Extract the pre-trained word embedding lookup table
     embed_model = transformers.AutoModel.from_pretrained(model_name)
-    embeddings = embed_model.get_input_embeddings()  # Word embeddings layer.
+    embeddings = embed_model.get_input_embeddings()  # Word embeddings layer
     embed_mat = embeddings.get_parameter("weight").detach()
     embed_dim = embeddings.embedding_dim
     del embed_model
@@ -96,7 +89,7 @@ class PretrainedEmbedding(nn.Module):
     ) -> NamedTensor["batch", "embed"]:
         embeds = self.embed(x)
         if self.use_normalization:
-            embeds = l2norm(embeds) * self.scale
+            embeds = F.normalize(embeds, p=2, dim=-1) * self.scale
         return embeds
 
 
@@ -116,12 +109,9 @@ class PretrainedUnEmbedding(nn.Module):
         self, x: NamedTensor["batch", "pos", "dim"]
     ) -> NamedTensor["batch", "pos", "vocab"]:
         # CDCD Framework: Apply L2-normalisation to the embedding estimate
-        # before calculating the score estimate (__renormalisation__).
-
-        # TODO: This is probably the wrong place to put it?
-
+        # before calculating the score estimate (__renormalisation__)
         if self.renormalize:
-            x = l2norm(x)
+            x = F.normalize(x, p=2, dim=-1)
         return self.unembed(x)
 
 
@@ -219,6 +209,7 @@ class RandomFourierEmbedding(nn.Module):
     """Kat's Fourier embedding.
     Reference: https://github.com/crowsonkb/k-diffusion/blob/f4e99857772fc3a126ba886aadf795a332774878/k_diffusion/layers.py#L219
     """
+
     def __init__(self, in_features, out_features, std=1.0):
         super().__init__()
         assert out_features % 2 == 0
@@ -338,7 +329,7 @@ class ParallelEncoderBlock(nn.Module):
         self.conditioner = ConditionScaleAndBias(model_dim) if use_conditioner else None
 
         # Fused input projection: ((Wᵢq, Wᵢᵏ, Wᵢᵛ), (W1, W2))
-        # 1 matmul for all input projections.
+        # 1 matmul for all input projections
         attn_dims = 3 * (num_heads * head_dim,)  # (multi-q, multi-k, multi-v)
         ff_dims = 2 * (ff_mult * model_dim,)  # 2 * [4 * model_dim]
         self.fused_dims = (*attn_dims, *ff_dims)
@@ -478,7 +469,7 @@ def get_span_mask(seq_len: int, max_num_spans: int) -> Tensor:
     Example:
     >>> get_span_mask(10, 3)
     >>> [1, 1, 1, 0, 0, 0, 0, 0, 1, 1],
-    
+
     Handwritten Example:
 
     >>> empty_mask  = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -489,29 +480,28 @@ def get_span_mask(seq_len: int, max_num_spans: int) -> Tensor:
     Args:
         seq_len (L): The length of the sequences.
         max_num_spans (M): is the maximum number of spans.
-    
 
     Reference: Strudel et al. "Self-Conditioned Embedding For Text Generation"
         https://arxiv.org/abs/2211.04236
     """
-    # TODO: Make this batched so each sequence has different random spans.
+    # TODO: Make this batched so each sequence has different random spans
     num_spans = random.randint(1, max_num_spans)  # (n)
     if num_spans == 1:
         # If there is only one span we just do unconditional generation and
-        # zero out all conditional positions for infilling.
+        # zero out all conditional positions for infilling
         return torch.zeros(seq_len, dtype=torch.bool)
     # Sample uniformly without replacement n - 1 integers (i1, ..., i(n-1)) in [0, seq_len)
-    # and sort them in increasing order to satisfy the condition 0 < i1 < i2 < ... < i(n-1) < seq_len.
+    # and sort them in increasing order to satisfy the condition 0 < i1 < i2 < ... < i(n-1) < seq_len
     span_starts = sorted(random.sample(range(1, seq_len), num_spans - 1))  # (n - 1)
-    # m is defined using the even spans for conditioning (1) and odd spans for infilling (0).
+    # m is defined using the even spans for conditioning (1) and odd spans for infilling (0)
     mask = torch.zeros(seq_len, dtype=torch.bool)
     i_span_starts = list(enumerate(span_starts))
     for i, start in i_span_starts[:-1]:
         if i % 2 == 0:
-            mask[start:span_starts[i+1]] = True
+            mask[start : span_starts[i + 1]] = True
     last_i, last_span_start = i_span_starts[-1]
     if last_i % 2 == 0:
         mask[last_span_start:] = True
-    # Flip mask with probability 0.5 so the positions from 0 to i1 aren't always False(0).
+    # Flip mask with probability 0.5 so the positions from 0 to i1 aren't always False(0)
     mask = mask if random.random() < 0.5 else ~mask
     return mask

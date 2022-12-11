@@ -1,6 +1,6 @@
 """
 Basic Usage:
-torchrun --nproc_per_node=N train.py
+torchrun --nproc_per_node=<N> train.py
 """
 import argparse
 import copy
@@ -102,7 +102,7 @@ def train(
 
         # Log training stats
         if step % config.train.log_every == 0 and utils.is_main_process():
-            # run.log({f"train/{k}": v for k, v in stats.items()}, step=step)
+            run.log({f"train/{k}": v for k, v in stats.items()}, step=step)
             run.log({f"train/loss": loss}, step=step)
             info = f"🎛 Step: {step}/{config.train.max_steps} "
             info += f"𑗔 Loss: {loss:.5f} "
@@ -147,13 +147,14 @@ def train(
                 use_clamp=False,
                 device=inputs.device,
             )
+            end_time = time.perf_counter()
             samples = tokenizer.batch_decode(samples, skip_secial_tokens=True)
             sample_log = "💬 Generating samples..."
             for sample in samples:
                 sample_log += f"\n➜ {sample}"
             logger.info(sample_log)
             logger.info(
-                f"🕒 Generation took {time.perf_counter() - start_time:.2f} seconds."
+                f"🕒 Generation took {end_time - start_time:.2f} seconds."
             )
             model_ema.train()
 
