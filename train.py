@@ -273,6 +273,8 @@ if __name__ == "__main__":
     logger.info(f"🏘 Inner Model: {inner_model}")
     logger.info(f"👾 Parameter count: ~{format(utils.param_count(model), ',')}")
 
+    if torch.cuda.is_available():
+        model.cuda()
     if dist.is_initialized():
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -290,16 +292,12 @@ if __name__ == "__main__":
         checkpoint = torch.load(config.train.checkpoint_path)
         model.module.load_state_dict(checkpoint["model"], strict=True)
         model_ema.module.load_state_dict(checkpoint["model_ema"], strict=True)
-        if torch.cuda.is_available():
-            model.cuda()
         optimizer.load_state_dict(checkpoint["optimizer"])
         lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
         scaler.load_state_dict(checkpoint["scaler"])
         step_state = checkpoint["step"]
     else:
         step_state = 0
-        if torch.cuda.is_available():
-            model.cuda()
 
     logger.info("🏁 Starting training...")
     train(

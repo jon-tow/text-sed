@@ -276,12 +276,12 @@ def multihead_attn(
     q: Tensor,
     k: Tensor,
     v: Tensor,
-    scale: float,
+    softmax_scale: float,
     bias: Optional[Tensor] = 0.0,
 ) -> Tensor:
     """Scaled Dot-Product Attention ("Soft Look-Up Table")."""
     score = torch.einsum("... h s d, ... h S d -> ... h s S", q, k)
-    score = score * scale + bias
+    score = score * softmax_scale + bias
     weight = F.softmax(score, dim=-1)
     attn = torch.einsum("... h s S, ... h S d -> ... h s d", weight, v)
     return attn
@@ -318,7 +318,7 @@ class ParallelEncoderBlock(nn.Module):
     ):
         super().__init__()
         self.num_heads = num_heads
-        self.scale = head_dim ** (-0.5)  # Scaled dot-product attention factor: 1 / √dₖ
+        self.softmax_scale = head_dim ** (-0.5)  # Scaled dot-product attention factor: 1 / √dₖ
         self.norm = nn.LayerNorm(model_dim)
         self.gelu = FusedGELU()
 
@@ -368,7 +368,7 @@ class ParallelEncoderBlock(nn.Module):
 
             k = torch.cat([k_left, k_right], dim=-1)
             q = torch.cat([q_left, q_right], dim=-1)
-        attn = multihead_attn(q, k, v, scale=self.scale)
+        attn = multihead_attn(q, k, v, softmax_scale=self.softmax_scale)
         concat = merge_heads(attn)  # [..., pos, (num_heads * head_dim)]
 
         # Output projection: [..., pos, model_dim]
