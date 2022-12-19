@@ -488,8 +488,8 @@ def get_span_mask(seq_len: int, max_num_spans: int) -> Tensor:
     num_spans = random.randint(1, max_num_spans)  # (n)
     if num_spans == 1:
         # If there is only one span we just do unconditional generation and
-        # zero out all conditional positions for infilling
-        return torch.zeros(seq_len, dtype=torch.bool)
+        # zero out none of the positions.
+        return torch.ones(seq_len, dtype=torch.bool)
     # Sample uniformly without replacement n - 1 integers (i1, ..., i(n-1)) in [0, seq_len)
     # and sort them in increasing order to satisfy the condition 0 < i1 < i2 < ... < i(n-1) < seq_len
     span_starts = sorted(random.sample(range(1, seq_len), num_spans - 1))  # (n - 1)
@@ -504,4 +504,7 @@ def get_span_mask(seq_len: int, max_num_spans: int) -> Tensor:
         mask[last_span_start:] = True
     # Flip mask with probability 0.5 so the positions from 0 to i1 aren't always False(0)
     mask = mask if random.random() < 0.5 else ~mask
+    # Don't allow masking the entire sequence
+    if (mask == False).all():
+        mask = ~mask
     return mask
