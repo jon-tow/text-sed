@@ -11,12 +11,12 @@ model:
   num_heads: 16
   seq_len: 32
   max_gen_len: 32
-  scale: 1.0
-  guide_scale: null
+  max_num_spans: 3  # 9
   num_steps: 1000
   num_gen_steps: 1000
-  ema_decay: 0.9999
-  ema_every: 10
+  guide_scale: null
+  ema_decay: 0.0 # 0.9999
+  ema_every: 1
   noise_schedule: cosine
   use_self_cond: true
   time_delta: 0.0
@@ -28,13 +28,13 @@ optimizer:
   lr: 1e-4
   lr_scheduler: linear
   warmup_steps: 5000
-  weight_decay: 0.01
+  weight_decay: 0.001
   eps: 1e-06
   betas: [0.9, 0.999]
   max_grad_norm: 1.0
 
 train:
-  batch_size: 128
+  batch_size: 256
   max_steps: 500000
   eval_every: 1000
   log_stats: false
@@ -61,6 +61,6 @@ data:
 
 logging:
   wandb_id: null
-  wandb_entity: null
+  wandb_entity: "jon-tow"
   wandb_project: ${name}
   wandb_group: "Processes"

@@ -52,7 +52,7 @@ def generate(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint_path", type=str, default=None)
+    parser.add_argument("--checkpoint_path", type=str)
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--time_delta", type=float, default=None)
     parser.add_argument("--num_samples", type=int, default=8)

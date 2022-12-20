@@ -260,6 +260,7 @@ class TimeEmbedding(nn.Module):
             nn.Linear(dim, time_dim),
             FusedGELU(),
             nn.Linear(time_dim, dim),
+            FusedGELU(),
         )
 
     def forward(self, time: NamedTensor["batch"]) -> NamedTensor["batch dim"]:
@@ -403,7 +404,7 @@ class MaskConditionalTransformer(nn.Module):
         )
 
         # 2x b/c of self-conditioning concat of input and condition signal
-        self.in_proj = nn.Linear(2 * embed_dim, model_dim)
+        self.in_proj = nn.Linear(4 * embed_dim, model_dim)
         self.blocks = nn.ModuleList([
             ParallelEncoderBlock(
                 model_dim,
@@ -423,9 +424,10 @@ class MaskConditionalTransformer(nn.Module):
 
     def forward(
         self,
-        # TODO: Update args for span(conditional)-masking
         noisy_embeds: NamedTensor["batch", "pos", "dim"],
         prev_embeds: NamedTensor["batch", "pos", "dim"],
+        cond_embeds: NamedTensor["batch", "pos", "embed"],
+        cond_mask: NamedTensor["batch", "pos", "1"],
         time: NamedTensor["batch"],
     ) -> NamedTensor["batch", "pos", "embed"]:
         """
@@ -433,16 +435,26 @@ class MaskConditionalTransformer(nn.Module):
         1 on conditioning positions and 0 on positions to be infilled.
 
         Args:
-            # embeds (c): Token embeddings for clean positions.
-            noisy_embeds (x): Corrupted `embeds` embeddings.
-            prev_embeds (p): Previous predicted embeddings for self-conditioning.
+            noisy_embeds (x): Corrupted `embeds` embeddingsw ith 0 vectors in conditioning positions.
+            prev_embeds  (p): Previous predicted embeddings for self-conditioning.
+            cond_embeds  (c): Embeddings for clean conditioning positions.
+            cond_mask    (m): Boolean conditioning mask, indicating which tokens are given (‘clean’, 𝑚𝑖 = 0)
+                and which are to be generated (‘noisy’, 𝑚𝑖 = 1).
         """
         time_embeds = rearrange(self.time_embed(time), "... d -> ... 1 d")
-        cond_embeds = self.in_proj(torch.concat([noisy_embeds, prev_embeds], dim=-1))
+        # Expand conditioning mask to match embedding dim for concatenation
+        cond_mask = cond_mask.expand_as(noisy_embeds)
+        embeds_proj = self.in_proj(
+            torch.concat([
+                cond_embeds,               # Condition on clean positions
+                cond_mask * noisy_embeds,  # Zero out conditioning positions
+                cond_mask * prev_embeds,   # Zero out conditioning positions
+                cond_mask,
+            ], dim=-1))
         if self.pos_embed:
-            pos_embeds = self.pos_embed(cond_embeds)
-            cond_embeds += pos_embeds
-        hidden_states = cond_embeds
+            pos_embeds = self.pos_embed(embeds_proj)
+            embeds_proj += pos_embeds
+        hidden_states = embeds_proj
         for block in self.blocks:
             hidden_states = block(hidden_states, time_embeds)
         hidden_states = self.out_proj(hidden_states)

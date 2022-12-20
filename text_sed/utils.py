@@ -94,21 +94,21 @@ def get_grouped_params(
     """
     decay = set()
     no_decay = set()
-    for mn, m in model.named_modules():
-        for pn, p in m.named_parameters():
-            fpn = "%s.%s" % (mn, pn) if mn else pn  # full param name
+    for module_name, module in model.named_modules():
+        for param_name, param in module.named_parameters():
+            full_param_name = "%s.%s" % (module_name, param_name) if module_name else param_name  # full param name
             # random note: because named_modules and named_parameters are recursive
             # we will see the same tensors p many many times. but doing it this way
             # allows us to know which parent module any tensor p belongs to...
-            if pn.endswith("bias"):
+            if param_name.endswith("bias") or len(param.shape) == 1:
                 # all biases will not be decayed
-                no_decay.add(fpn)
-            elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):
+                no_decay.add(full_param_name)
+            elif param_name.endswith("weight") and isinstance(module, whitelist_weight_modules):
                 # weights of whitelist modules will be weight decayed
-                decay.add(fpn)
-            elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules):
+                decay.add(full_param_name)
+            elif param_name.endswith("weight") and isinstance(module, blacklist_weight_modules):
                 # weights of blacklist modules will NOT be weight decayed
-                no_decay.add(fpn)
+                no_decay.add(full_param_name)
 
     # validate that we considered every parameter
     param_dict = {pn: p for pn, p in model.named_parameters()}
@@ -168,7 +168,7 @@ def text_dataloader(
         batched=True,
         num_proc=num_workers,
     )
-    tokenized_dataset.set_format("pt", columns=["input_ids"])
+    tokenized_dataset.set_format("pt", columns=["input_ids", "attention_mask"])
     data_collator = transformers.DataCollatorWithPadding(
         tokenizer=tokenizer,
         return_tensors="pt",
@@ -235,6 +235,11 @@ def get_rank():
 
 def is_main_process():
     return get_rank() == 0
+
+
+def print_rank_0(*args, **kwargs):
+    if is_main_process():
+        print(*args, **kwargs)
 
 
 # Logging utils

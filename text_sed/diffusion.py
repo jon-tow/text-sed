@@ -1,12 +1,10 @@
 import functools
-import math
 import random
 from typing import Callable, Literal, NewType, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange, reduce
 
 from text_sed.layers import PretrainedEmbedding, PretrainedUnEmbedding, get_span_mask
 
@@ -24,25 +22,29 @@ Generator = NewType("Generator", torch.Generator)
 
 
 def cross_entropy_loss(
-    logits: Tensor,
-    targets: Tensor,
-    z_loss: Optional[float] = 0.0,
+    logits: NamedTensor["batch", "pos", "vocab"],
+    targets: NamedTensor["batch", "pos"],
+    mask: Optional[NamedTensor["batch", "pos", "1"]] = None,
 ) -> float:
-    """`mesh-transformer-jax` style cross entropy loss.
+    """
     Args:
         logits: The unnormalized label scores.
-        targets: The ground truth labels. These should be one-hot encoded.
+        targets: The ground truth labels. NOTE: These will be one-hot encoded.
     """
+    if mask is None:
+        mask = torch.ones_like(targets)[:, :, None]
+
+    num_ids = mask.sum()
+
     logits -= torch.max(logits, dim=-1, keepdim=True)[0]
     one_hot_targets = F.one_hot(targets, num_classes=logits.shape[-1])
     predicted_logits = torch.sum(one_hot_targets * logits, dim=-1)
     loss = -predicted_logits + torch.logsumexp(logits, dim=-1)
-    # Add the auxiliary z-loss term
-    loss += torch.mean(z_loss * (1e-4 * torch.square(torch.logsumexp(logits, dim=-1))))
-    loss = reduce(loss, "b ... -> 1", "mean")[0]
+    loss = torch.sum(loss[:, :, None] * mask) / num_ids
+
     # Compute the fraction of correct predictions per batch:
-    correct = (torch.argmax(logits, dim=-1) == targets).float()
-    correct = reduce(correct, "b ... -> 1", "mean")[0]
+    correct = (torch.argmax(logits, dim=-1) == targets).float()[:, :, None]
+    correct = torch.sum(correct * mask) / mask.sum()
     return dict(loss=loss, correct=correct)
 
 
@@ -119,10 +121,10 @@ def get_sampler(sampler_name: str, **kwargs) -> Callable:
 
 
 def ddim_step(
-    noisy_inputs: Tensor, # xₜ
+    noisy_inputs: Tensor,  # xₜ
     pred_inputs: Tensor,  # x̃₀
-    time_now: Tensor,     # t
-    time_next: Tensor,    # t - 1
+    time_now: Tensor,  # t
+    time_next: Tensor,  # t - 1
     schedule: Callable,
 ) -> Tensor:  # xₜ₋₁
     """Denoising diffusion implicit model step with η = 0. Estimates x₀ at
@@ -144,11 +146,11 @@ def ddim_step(
 
 def ddpm_step(
     noisy_inputs: Tensor,  # xₜ
-    pred_inputs: Tensor,   # x̃₀
-    time_now: Tensor,      # t
-    time_next: Tensor,     # t - 1
+    pred_inputs: Tensor,  # x̃₀
+    time_now: Tensor,  # t
+    time_next: Tensor,  # t - 1
     schedule: Callable,
-) -> Tensor:               # xₜ₋₁
+) -> Tensor:  # xₜ₋₁
     """Denoising diffusion implicit model step with η = 1. Estimates x₀ at
     time_next with the DDPM updating rule.
 
@@ -171,7 +173,7 @@ def ddpm_step(
 
 def corrupt(
     inputs: Tensor,  # x₀
-    time: Tensor,    # t
+    time: Tensor,  # t
     schedule: Callable,  # ᾱ schedule
 ) -> Tensor:
     """q sampler: q(xₜ | xₒ) ~ N(xₒ * √ᾱₜ, (1 - ᾱₜ)I)
@@ -182,7 +184,7 @@ def corrupt(
     """
     noise = torch.randn_like(inputs)  # ϵ
 
-    signal_rate = torch.sqrt(schedule(time))     # √ᾱₜ
+    signal_rate = torch.sqrt(schedule(time))  # √ᾱₜ
     noise_rate = torch.sqrt(1 - schedule(time))  # √(1 - ᾱₜ)
 
     signal_rate = utils.append_dims(signal_rate, inputs.ndim)
@@ -217,7 +219,9 @@ class TextSed(nn.Module):
                 # Bottleneck layer to shrink word embeddings: D → D'
                 nn.Linear(embed_dim, self.hidden_size),
                 # nn.LayerNorm(self.hidden_size),
-            ] if bottleneck_dim else [nn.Identity()],
+            ]
+            if bottleneck_dim
+            else [nn.Identity()],
         )
         # Continous-to-discrete learnable read-out matrix as an LM head
         self.read_out = nn.Sequential(
@@ -227,49 +231,98 @@ class TextSed(nn.Module):
                 # back to the same size as the word embeddings, `embed_dim`."
                 nn.Linear(self.hidden_size, embed_dim),
                 nn.LayerNorm(embed_dim),
-            ] if bottleneck_dim else [nn.Identity()],
+            ]
+            if bottleneck_dim
+            else [nn.Identity()],
             # Initalize read-out (R) to: Eᵀ ϵ Rᴰˣⱽ
             PretrainedUnEmbedding(embed_mat, use_renormalization=False),
-         ) # E′
+        )  # E′
 
     def forward(
         self,
-        inputs: NamedTensor["batch", "pos", "embed"],
-        use_self_cond: Optional[bool] = True,
-        z_loss: Optional[float] = 0.0,
-        mask: Optional[NamedTensor["batch", "pos"]] = None,
+        input_ids: NamedTensor["batch", "pos", "embed"],
+        attention_mask: Optional[NamedTensor["batch", "pos"]] = None,
+        cond_mask: Optional[NamedTensor["batch", "pos"]] = None,
+        use_self_cond: bool = True,
     ) -> NamedTensor["batch", "pos", "embed"]:
         """
         Args:
-            inputs: The input token sequence.
+            input_ids: The input token sequence.
+            attention_mask: The attention mask for the input sequence.
         """
-        batch_size, seq_len = inputs.shape[0], inputs.shape[1]
+        batch_size, num_pos = input_ids.shape[0], input_ids.shape[1]
+        attention_mask: NamedTensor["batch", "pos", "1"] = attention_mask[:, :, None]
+        # utils.print_rank_0(f"input_ids.shape: {input_ids.shape}")
+        # utils.print_rank_0(f"attention_mask.shape: {attention_mask.shape}")
 
         # Discrete-to-continuous data embedding (token/word -> embedding)
-        embeds = self.read_in(inputs)
+        embeds = self.read_in(input_ids)
+        # utils.print_rank_0(f"embeds.shape: {embeds.shape}")
 
-        # Get masks
-        if mask is None:
-            mask = get_span_mask(seq_len, max_num_spans=self.max_num_spans)
-            mask = mask[None, :, None].to(embeds.device)
+        # Get random span masks if not provided
+        if cond_mask is None:
+            # Conditioning Mask: 0s for condition position and 1s for infilling positions
+            # c1 c2 n1 n2 n3 c3 -> 0 0 1 1 1 0
+            cond_mask = get_span_mask(num_pos, max_num_spans=self.max_num_spans)
+            # TODO: When `cond_mask` are batched, replace the first `None` in the next line with `:`
+            cond_mask: NamedTensor["batch", "pos", "1"] = cond_mask[
+                None, :, None
+            ].expand_as(attention_mask)
+
+            # Infilling Mask: 1s for infilling positions and 0s for condition positions
+            # c1 c2 n1 n2 n3 c3 -> 1 1 0 0 0 1
+            # infill_mask = ~cond_mask
+        else:
+            cond_mask: NamedTensor["batch", "pos", "1"] = cond_mask[:, :, None]
+
+        # utils.print_rank_0(f"cond_mask.shape: {cond_mask.shape}")
+        # utils.print_rank_0(f"cond_mask: {cond_mask[0]}")
+        # utils.print_rank_0(f"attention_mask: {attention_mask[0]}")
+
+        # Mask out padding positions using the attention mask
+        cond_mask = cond_mask.to(attention_mask.device)
+        cond_mask = attention_mask * cond_mask
+        # utils.print_rank_0(f"cond_mask * attn mask: {cond_mask[0]}")
+        # utils.print_rank_0(f"~cond_mask * attn mask: {1 - cond_mask[0]}")
+
+        # Get the ("clean") conditioning embeddings: c1 c2 n1 n2 n3 c3 -> c1 c2 0 0 0 c3
+        cond_embeds = (1 - cond_mask) * embeds * attention_mask  # Remember to re-mask the padding
+        # utils.print_rank_0(f"embeds: {embeds[0]}")
+        # utils.print_rank_0(f"cond_embeds: {cond_embeds[0]}")
 
         # Select random timesteps
         time = torch.rand((batch_size,), device=embeds.device)
         noisy_embeds = corrupt(embeds, time, schedule=self.noise_schedule)
+
         # Compute self-conditioning estimate
         prev_embeds = torch.zeros_like(noisy_embeds, dtype=noisy_embeds.dtype)
         if use_self_cond and random.random() > 0.5:
             with torch.no_grad():
                 prev_embeds = self.model(
-                    noisy_embeds, prev_embeds, time=time).detach()
+                    noisy_embeds=noisy_embeds,  # `x`
+                    prev_embeds=prev_embeds,  # `p`
+                    cond_embeds=cond_embeds,  # `c`
+                    cond_mask=cond_mask,  # `m`
+                    time=time,
+                ).detach()
+
         # Predict embeddings
-        pred_embeds = self.model(noisy_embeds, prev_embeds, time=time)
+        pred_embeds = self.model(
+            noisy_embeds=noisy_embeds,  # `x`
+            prev_embeds=prev_embeds,  # `p`
+            cond_embeds=cond_embeds,  # `c`
+            cond_mask=cond_mask,  # `m`
+            time=time,
+        )
+        # Diffusion loss (Masked MSE)
+        # NOTE: Only compute mse loss on the infilling positions
+        loss_mse = torch.sum(cond_mask * (pred_embeds - embeds) ** 2) / cond_mask.sum()
+
         # Get lm-head logits
         logits = self.read_out(pred_embeds)
+        # Reconstruction loss
+        loss_recon = cross_entropy_loss(logits, targets=input_ids, mask=attention_mask)
 
-        # Diffusion and Reconstruction loss
-        loss_mse = F.mse_loss(pred_embeds, target=embeds, reduction="mean")
-        loss_recon = cross_entropy_loss(logits, targets=inputs, z_loss=z_loss)
         total_loss = loss_mse + loss_recon["loss"]
         return total_loss, utils.flatten_dict(
             dict(
@@ -283,15 +336,15 @@ class TextSed(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        shape: Shape,
+        shape: Shape,  # ["batch", "pos", "embed"],
         num_steps: int,
         *,
         sampler: Callable = ddim_step,
         use_clamp: bool = False,
         time_delta: float = 0.0,
-        conds: Optional[NamedTensor["batch", "pos", "embed"]] = None,
+        cond_embeds: Optional[NamedTensor["batch", "pos", "embed"]] = None,
+        cond_mask: Optional[NamedTensor["batch", "pos"]] = None,
         guide_scale: Optional[float] = None,
-        mask: Optional[NamedTensor["batch", "pos"]] = None,
         device: Device = "cuda:0",
     ) -> NamedTensor:
         """p sampler
@@ -305,6 +358,13 @@ class TextSed(nn.Module):
             use_clamp: Whether to clamp predicted embeddings to the range
                 [-1, 1] before each diffusion sampling step.
         """
+
+        if cond_embeds is None:
+            cond_embeds = torch.zeros(shape, device=device)
+
+        if cond_mask is None:
+            cond_mask = torch.ones(shape, device=device)
+
         # Sample start embedding from the normal prior eₜ ~ qₜ
         eₜ_prev = torch.randn(shape, device=device)
         pred_eₒ = torch.zeros_like(eₜ_prev)
@@ -312,21 +372,25 @@ class TextSed(nn.Module):
             # Get time for current and next states
             # (NOTE: (1 - ...) to process in reverse)
             time_now = torch.tensor([1 - step / num_steps], device=device)
-            time_next = torch.tensor([
-                torch.maximum(
-                    torch.tensor(1 - (step + 1 + time_delta) / num_steps),
-                    torch.tensor(0.0),
-                )],
+            time_next = torch.tensor(
+                [
+                    torch.maximum(
+                        torch.tensor(1 - (step + 1 + time_delta) / num_steps),
+                        torch.tensor(0.0),
+                    )
+                ],
                 device=device,
             )
 
-            if guide_scale is not None and conds is None:  # Self-conditioning guidance
+            if (
+                guide_scale is not None and cond_embeds is None
+            ):  # Self-conditioning guidance
                 # Predict start embeds (eₒ) without self-cond
                 ũₒ = self.model(eₜ_prev, torch.zeros_like(eₜ_prev), time_now)
                 # Predict start embeds (eₒ) with self-conditiong
                 c̃ₒ = self.model(eₜ_prev, ũₒ, time_now)
                 # Apply self-conditioning guidance
-                pred_eₒ = guide_scale * c̃ₒ + (1.0 - guide_scale) * ũₒ 
+                pred_eₒ = guide_scale * c̃ₒ + (1.0 - guide_scale) * ũₒ
             # elif guide_scale is not None and conds is not None:  # Classifier Free Guidance
             #     # Predict start embeds (eₒ) without self-cond
             #     cond_embeds = self.read_in(conds)
@@ -336,7 +400,13 @@ class TextSed(nn.Module):
             #     pred_eₒ = guide_scale * ũₒ
             else:
                 # Self-conditioned prediction using the previous predictions, ẽₒ
-                pred_eₒ = self.model(eₜ_prev, pred_eₒ, time=time_now)
+                pred_eₒ = self.model(
+                    noisy_embeds=eₜ_prev,
+                    prev_embeds=pred_eₒ,
+                    cond_embeds=cond_embeds,
+                    cond_mask=cond_mask,
+                    time=time_now,
+                )
 
             if use_clamp:
                 # Clamping Trick (see footnote 6 in the paper):
@@ -346,9 +416,46 @@ class TextSed(nn.Module):
                 pred_eₒ = torch.clamp(pred_eₒ, -1.0, 1.0)
 
             # Estimate embeds at time_next eₜ₋₁
-            eₜ_prev = sampler(eₜ_prev, pred_eₒ, time_now, time_next, self.noise_schedule)
+            eₜ_prev = sampler(
+                eₜ_prev, pred_eₒ, time_now, time_next, self.noise_schedule
+            )
 
         # Token decoding: continous embeddings to discrete tokens
         logits = self.read_out(pred_eₒ)
         tokens = torch.argmax(logits, -1)
         return tokens
+
+
+# def corrupt(
+#     inputs: Tensor,      # x₀
+#     time: Tensor,        # t
+#     schedule: Callable,  # ᾱ schedule
+#     mask: Optional[Tensor] = None,    # m
+# ) -> Tensor:
+#     """q sampler: q(xₜ | xₒ) ~ N(xₒ * √ᾱₜ, (1 - ᾱₜ)I)
+#     Arbitrary time q-sampler for forward diffusion processing (corruption).
+
+#     Args:
+#         mask: The infilling mask. If None, add noise to all elements.
+#     Reference: Ho et al. "Denoising Diffusion Probabilistic Models". 2020.
+#         https://arxiv.org/abs/2006.11239
+#     """
+#     noise = torch.randn_like(inputs)  # ϵ
+#     if mask is not None:
+#         # Only add noise to infilling positions
+#         noise = mask * noise
+#         # TODO: Do we need to also mask inputs? What does this do the signal rate
+#         # scaled positions?
+#         infill_inputs = mask * inputs
+
+#     signal_rate = torch.sqrt(schedule(time))     # √ᾱₜ
+#     noise_rate = torch.sqrt(1 - schedule(time))  # √(1 - ᾱₜ)
+
+#     signal_rate = utils.append_dims(signal_rate, inputs.ndim)
+#     noise_rate = utils.append_dims(noise_rate, inputs.ndim)
+
+#     # Add Gaussian noise to the embeddings for noisy (infilling) positions
+#     noisy_inputs = signal_rate * infill_inputs + noise_rate * noise
+#     clean_inputs = ~mask * inputs
+#     # Add back the conditionining positions
+#     return noisy_inputs + clean_inputs

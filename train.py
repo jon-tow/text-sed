@@ -4,6 +4,7 @@ torchrun --nproc_per_node=<N> train.py
 """
 import argparse
 import copy
+import multiprocessing
 import os
 import time
 from typing import *
@@ -81,13 +82,15 @@ def train(
     ):
         step += 1
 
+        batch = next(train_iter)
         # TODO: The `BatchSampler` + `DataLoader` prepends an extra dimension to
         # the data. This is a hack to remove it.
-        inputs = next(train_iter)["input_ids"].to(device)[0]
+        input_ids = batch["input_ids"][0].to(device)
+        attention_mask = batch["attention_mask"][0].to(device)
         with torch.amp.autocast(
             device_type="cuda", dtype=utils.get_dtype(config.train.dtype)
         ):
-            loss, stats = model(inputs)
+            loss, stats = model(input_ids, attention_mask=attention_mask)
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(
@@ -127,7 +130,7 @@ def train(
             # model.train()
 
         # Generate samples
-        is_sample_step = step % config.train.sample_every == 0 and step != 0
+        is_sample_step = step % config.train.sample_every == 0
         if is_sample_step and utils.is_main_process():
             model_ema.eval()
             logger.info("💬 Generating samples...")
@@ -146,7 +149,7 @@ def train(
                 time_delta=config.model.time_delta,
                 guide_scale=config.model.guide_scale,
                 use_clamp=False,
-                device=inputs.device,
+                device=input_ids.device,
             )
             end_time = time.perf_counter()
             samples = tokenizer.batch_decode(samples, skip_secial_tokens=True)
@@ -229,9 +232,10 @@ if __name__ == "__main__":
 
     utils.set_seed(config.seed, use_device_specific_seeds=True)
 
-    # Initialize tokenizer - turn off HuggingFace parallelism warnings
+    # Initialize tokenizer
     logger.info("⏳ Loading tokenizer...")
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    # Turn turn off HuggingFace parallelism warnings
+    multiprocessing.set_start_method("spawn")
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         config.model.embed_model_name,
         use_fast=config.data.use_fast_tokenizer,
@@ -254,6 +258,7 @@ if __name__ == "__main__":
         embed_mat=embed_mat,
         noise_schedule=diffusion.get_noise_schedule(config.model.noise_schedule),
         bottleneck_dim=config.model.bottleneck_dim,
+        max_num_spans=config.model.max_num_spans,
     )
     optimizer = torch.optim.AdamW(
         utils.get_grouped_params(model, config.optimizer.weight_decay),
