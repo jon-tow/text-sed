@@ -1,16 +1,15 @@
 import math
 import random
+from functools import partial
+from typing import Literal, NewType, Optional, Tuple
 
-import transformers
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import transformers
 from einops import rearrange
-from functools import partial
 
-from typing import NewType, Literal, Optional, Tuple
-
+import text_sed.utils as utils
 
 DType = NewType("DType", torch.dtype)
 Shape = NewType("Shape", Tuple[int, ...])
@@ -125,26 +124,51 @@ def rotate_half(x):
 
 @torch.jit.script
 def apply_rotary_positional_embedding(
-    x: torch.Tensor,
-    freqs: torch.Tensor,
+    x: torch.Tensor, # ["batch", "heads", "pos", "dim"]
+    sin: torch.Tensor, # ["1", "1", "pos", "dim"]
+    cos: torch.Tensor, # ["1", "1", "pos", "dim"]
     seq_dim: int = -2,
 ):
     seq_len = x.shape[seq_dim]
-    freqs = freqs[-seq_len:, :]
-    return (x * torch.cos(freqs)) + (rotate_half(x) * torch.sin(freqs))
+    return (x * cos) + (rotate_half(x) * sin)
 
 
 class RotaryPositionalEmbedding(nn.Module):
-    def __init__(self, dim: int, max_period: int = 10_000):
+    """GPT-NeoX style rotary positional embedding."""
+    def __init__(
+        self,
+        dim: int,
+        max_period: int = 10_000,
+        precision: torch.dtype = torch.half
+    ):
         super().__init__()
-        inv_freq = 1.0 / (max_period ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer("inv_freq", inv_freq)
+        inv_freq = 1. / (max_period ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+        self.seq_len_cached = None
+        self.cos_cached = None
+        self.sin_cached = None
+        self.precision = precision
 
-    def forward(self, x: int, seq_dim: int = -2):
+    def forward(
+        self,
+        x: NamedTensor["batch", "heads", "pos", "dim"],
+        seq_dim: int = -2
+   ) -> NamedTensor["1", "1", "pos", "dim"]:
         seq_len = x.shape[seq_dim]
-        t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
-        freqs = torch.einsum("i , j -> i j", t, self.inv_freq)
-        return torch.cat((freqs, freqs), dim=-1).to(x.device)
+        if seq_len != self.seq_len_cached:
+            self.seq_len_cached = seq_len
+            t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
+            freqs = torch.einsum('i , j -> i j', t, self.inv_freq)
+            embeds = torch.cat((freqs, freqs), dim=-1).to(x.device)
+            if self.precision == torch.bfloat16:
+                embeds = embeds.float()
+            # Shapes: ["batch", "heads", "pos", "dim"]
+            self.sin_cached = embeds.sin()[None, None, :, :]
+            self.cos_cached = embeds.cos()[None, None, :, :]
+            if self.precision == torch.bfloat16:
+                self.sin_cached = self.sin_cached.bfloat16()
+                self.cos_cached = self.cos_cached.bfloat16()
+        return self.sin_cached, self.cos_cached
 
 
 def fixed_positional_embedding(
@@ -260,7 +284,6 @@ class TimeEmbedding(nn.Module):
             nn.Linear(dim, time_dim),
             FusedGELU(),
             nn.Linear(time_dim, dim),
-            FusedGELU(),
         )
 
     def forward(self, time: NamedTensor["batch"]) -> NamedTensor["batch dim"]:
@@ -281,9 +304,11 @@ def multihead_attn(
     bias: Optional[Tensor] = 0.0,
 ) -> Tensor:
     """Scaled Dot-Product Attention ("Soft Look-Up Table")."""
-    score = torch.einsum("... h s d, ... h S d -> ... h s S", q, k)
-    score = score * softmax_scale + bias
-    weight = F.softmax(score, dim=-1)
+    score = torch.einsum("... h s d, ... h S d -> ... h s S",
+        # Scale before softmax for numerical stability
+        q * softmax_scale, k * softmax_scale)
+    score = score + bias[:, None, :, :].expand_as(score)
+    weight = F.softmax(score.float(), dim=-1).type_as(score)
     attn = torch.einsum("... h s S, ... h S d -> ... h s d", weight, v)
     return attn
 
@@ -310,8 +335,9 @@ class ParallelEncoderBlock(nn.Module):
     def __init__(
         self,
         model_dim: int,
-        head_dim: int,
         num_heads: int,
+        *,
+        head_dim: Optional[int] = None,
         ff_mult: int = 4,  # Inner ff upscale factor (d_ff * 4)
         use_conditioner: bool = True,
         use_rotary: bool = True,
@@ -319,34 +345,34 @@ class ParallelEncoderBlock(nn.Module):
     ):
         super().__init__()
         self.num_heads = num_heads
-        self.softmax_scale = head_dim ** (-0.5)  # Scaled dot-product attention factor: 1 / √dₖ
+        self.head_dim = head_dim if head_dim is not None else model_dim // num_heads
+        self.softmax_scale = self.head_dim ** (-0.5)  # Scaled dot-product attention factor: 1 / √dₖ
         self.norm = nn.LayerNorm(model_dim)
         self.gelu = FusedGELU()
 
-        rotary_embed_dim = max(head_dim // 2 if rotary_dim is None else rotary_dim, 32)
-        self.rotary_pos_embed = (
-            RotaryPositionalEmbedding(rotary_embed_dim) if use_rotary else None
-        )
+        rotary_embed_dim = max(self.head_dim // 2 if rotary_dim is None else rotary_dim, 32)
+        self.rotary_pos_embed = RotaryPositionalEmbedding(rotary_embed_dim) if use_rotary else None
         self.conditioner = ConditionScaleAndBias(model_dim) if use_conditioner else None
 
         # Fused input projection: ((Wᵢq, Wᵢᵏ, Wᵢᵛ), (W1, W2))
         # 1 matmul for all input projections
-        attn_dims = 3 * (num_heads * head_dim,)  # (multi-q, multi-k, multi-v)
+        attn_dims = 3 * (num_heads * self.head_dim,)  # (multi-q, multi-k, multi-v)
         ff_dims = 2 * (ff_mult * model_dim,)  # 2 * [4 * model_dim]
         self.fused_dims = (*attn_dims, *ff_dims)
         self.proj_in = nn.Linear(model_dim, sum(self.fused_dims), bias=False)
 
         # Output projections
-        self.attn_proj = nn.Linear(num_heads * head_dim, model_dim, bias=False)
+        self.attn_proj = nn.Linear(num_heads * self.head_dim, model_dim, bias=False)
         self.ff_proj = nn.Linear(ff_mult * model_dim, model_dim, bias=True)
 
     def forward(
         self,
-        inputs: NamedTensor["...", "pos", "dim"],
-        time_embeds: Optional[NamedTensor["batch dim"]] = None,
+        input_ids: NamedTensor["...", "pos", "dim"],
+        attention_mask: Optional[NamedTensor["batch", "pos", "1"]] = None,
+        time_embeds: Optional[NamedTensor["batch", "1", "dim"]] = None,
     ) -> Tensor:
         # Pre-Norm: [..., pos, dim]
-        units = self.norm(inputs)
+        units = self.norm(input_ids)
         if self.conditioner:
             units = self.conditioner(units, time_embeds)
 
@@ -358,24 +384,24 @@ class ParallelEncoderBlock(nn.Module):
         # [..., num_heads, pos, head_dim]
         q, k, v = map(partial(split_heads, num_heads=self.num_heads), (q, k, v))
         if self.rotary_pos_embed:
-            pos_embeds = self.rotary_pos_embed(k)
-            rot_dim = pos_embeds.shape[-1]
+            sin, cos = self.rotary_pos_embed(k)
+            rot_dim = sin.shape[-1]
 
             q_left, q_right = q[..., :rot_dim], q[..., rot_dim:]
             k_left, k_right = k[..., :rot_dim], k[..., rot_dim:]
 
-            q_left = apply_rotary_positional_embedding(q_left, pos_embeds)
-            k_left = apply_rotary_positional_embedding(k_left, pos_embeds)
+            q_left = apply_rotary_positional_embedding(q_left, sin, cos)
+            k_left = apply_rotary_positional_embedding(k_left, sin, cos)
 
             k = torch.cat([k_left, k_right], dim=-1)
             q = torch.cat([q_left, q_right], dim=-1)
-        attn = multihead_attn(q, k, v, softmax_scale=self.softmax_scale)
+        attn = multihead_attn(q, k, v, softmax_scale=self.softmax_scale, bias=attention_mask)
         concat = merge_heads(attn)  # [..., pos, (num_heads * head_dim)]
 
         # Output projection: [..., pos, model_dim]
         attn_out = self.attn_proj(concat)
         ff_out = self.ff_proj(ff * self.gelu(ff_gate))
-        return inputs + attn_out + ff_out
+        return input_ids + attn_out + ff_out
 
 
 class MaskConditionalTransformer(nn.Module):
@@ -385,11 +411,11 @@ class MaskConditionalTransformer(nn.Module):
         model_dim: int,
         max_seq_len: int,
         *,
-        head_dim: Optional[int] = 64,
-        num_heads: Optional[int] = 16,
-        num_layers: Optional[int] = 12,
-        ff_mult: Optional[int] = 4,
-        use_abs_pos_embed: bool = False,
+        head_dim: Optional[int] = None,
+        num_heads: int = 16,
+        num_layers: int = 12,
+        ff_mult: int = 4,
+        use_abs_pos: bool = False,
         use_rotary: bool = True,
         rotary_dim: Optional[int] = None,
     ):
@@ -399,7 +425,7 @@ class MaskConditionalTransformer(nn.Module):
         self.time_embed = TimeEmbedding(model_dim)
         self.pos_embed = (
             LearnedAbsolutePositionalEmbedding(model_dim, max_seq_len)
-            if use_abs_pos_embed
+            if use_abs_pos
             else None
         )
 
@@ -408,8 +434,8 @@ class MaskConditionalTransformer(nn.Module):
         self.blocks = nn.ModuleList([
             ParallelEncoderBlock(
                 model_dim,
-                head_dim,
                 num_heads,
+                head_dim=head_dim,
                 ff_mult=ff_mult,
                 use_rotary=use_rotary,
                 rotary_dim=rotary_dim,
@@ -443,20 +469,24 @@ class MaskConditionalTransformer(nn.Module):
         """
         time_embeds = rearrange(self.time_embed(time), "... d -> ... 1 d")
         # Expand conditioning mask to match embedding dim for concatenation
-        cond_mask = cond_mask.expand_as(noisy_embeds)
+        expanded_cond_mask = cond_mask.expand_as(noisy_embeds)
         embeds_proj = self.in_proj(
             torch.concat([
-                cond_embeds,               # Condition on clean positions
-                cond_mask * noisy_embeds,  # Zero out conditioning positions
-                cond_mask * prev_embeds,   # Zero out conditioning positions
-                cond_mask,
+                expanded_cond_mask * noisy_embeds,  # Zero out conditioning positions
+                expanded_cond_mask * prev_embeds,   # Zero out conditioning positions
+                expanded_cond_mask,
+                cond_embeds,                        # Condition on clean positions
             ], dim=-1))
         if self.pos_embed:
             pos_embeds = self.pos_embed(embeds_proj)
             embeds_proj += pos_embeds
         hidden_states = embeds_proj
         for block in self.blocks:
-            hidden_states = block(hidden_states, time_embeds)
+            hidden_states = block(
+                hidden_states,
+                attention_mask=(1 - cond_mask) * -1e-7,
+                time_embeds=time_embeds
+            )
         hidden_states = self.out_proj(hidden_states)
         return self.final_norm(hidden_states)
 
@@ -464,18 +494,21 @@ class MaskConditionalTransformer(nn.Module):
 # Masking helpers
 
 
-def get_prefix_mask(seq_len: int) -> Tensor:
-    """Returns a prefix mask of random length in [0, (seq_len / 2) - 1)."""
+def get_prefix_mask(seq_len: int, rate: float = 0.75) -> torch.Tensor:
+    """Returns a prefix mask of random length in the range [0, rate * seq_len - 1]"""
     indices = torch.arange(0, seq_len)
-    prefix_len = random.randint(0, (seq_len // 2) - 1)
+    prefix_len = random.randint(0, int(seq_len * rate) - 1)
+    mask = torch.ones((seq_len))
+    if random.random() > 0.5:
+        return mask
     mask = (indices > prefix_len).float()
     return mask
 
 
 def get_span_mask(seq_len: int, max_num_spans: int) -> Tensor:
     """Returns a binary mask of span partitions for a sequence
-    where 1s indicates a span region who's tokens will be kept to
-    condition on and 0s indicate a span region who's tokens will be
+    where 0s indicates a span region who's tokens will be conditioned
+    and 1s indicate a span region who's tokens will be
     masked out for corruption -> infilling.
 
     Example:

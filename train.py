@@ -235,7 +235,7 @@ if __name__ == "__main__":
     # Initialize tokenizer
     logger.info("⏳ Loading tokenizer...")
     # Turn turn off HuggingFace parallelism warnings
-    multiprocessing.set_start_method("spawn")
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         config.model.embed_model_name,
         use_fast=config.data.use_fast_tokenizer,
@@ -243,7 +243,8 @@ if __name__ == "__main__":
     )
 
     # Initialize model and optimizer
-    embed_mat, embed_dim = layers.auto_extract_embed_mat(config.model.embed_model_name)
+    embed_mat, embed_dim = layers.auto_extract_embed_mat(
+        config.model.embed_model_name)
     inner_model = layers.MaskConditionalTransformer(
         embed_dim=config.model.bottleneck_dim
         if config.model.bottleneck_dim
@@ -252,16 +253,25 @@ if __name__ == "__main__":
         max_seq_len=config.model.seq_len,
         head_dim=config.model.head_dim,
         num_heads=config.model.num_heads,
+        use_abs_pos=config.model.use_abs_pos,
+        use_rotary=config.model.use_rotary,
     )
     model = diffusion.TextSed(
         model=inner_model,
         embed_mat=embed_mat,
-        noise_schedule=diffusion.get_noise_schedule(config.model.noise_schedule),
+        noise_schedule=diffusion.get_noise_schedule(
+            config.model.noise_schedule),
         bottleneck_dim=config.model.bottleneck_dim,
         max_num_spans=config.model.max_num_spans,
     )
     optimizer = torch.optim.AdamW(
-        utils.get_grouped_params(model, config.optimizer.weight_decay),
+        utils.get_grouped_params(
+            model, config.optimizer.weight_decay,
+            exlcuded_modules=(
+                torch.nn.LayerNorm,
+                torch.nn.Embedding,
+            )
+        ),
         lr=config.optimizer.lr,
         weight_decay=config.optimizer.weight_decay,
         betas=tuple(config.optimizer.betas),

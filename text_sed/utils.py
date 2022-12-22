@@ -12,7 +12,6 @@ import transformers
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import BatchSampler, RandomSampler
 
-from .layers import LearnedAbsolutePositionalEmbedding
 
 logger = logging.getLogger(__name__)
 
@@ -81,12 +80,8 @@ def param_count(model: torch.nn.Module) -> int:
 def get_grouped_params(
     model: torch.nn.Module,
     weight_decay: float,
-    whitelist_weight_modules: Tuple[torch.nn.Module] = (torch.nn.Linear,),
-    blacklist_weight_modules: Tuple[torch.nn.Module] = (
-        torch.nn.LayerNorm,
-        torch.nn.Embedding,
-        LearnedAbsolutePositionalEmbedding,
-    ),
+    included_modules: Tuple[torch.nn.Module] = (torch.nn.Linear,),
+    exlcuded_modules: Tuple[torch.nn.Module] = (torch.nn.LayerNorm, torch.nn.Embedding),
 ):
     """Removes weight decay from parameters with names containing any of the
     strings in `no_decay`.
@@ -103,10 +98,10 @@ def get_grouped_params(
             if param_name.endswith("bias") or len(param.shape) == 1:
                 # all biases will not be decayed
                 no_decay.add(full_param_name)
-            elif param_name.endswith("weight") and isinstance(module, whitelist_weight_modules):
+            elif param_name.endswith("weight") and isinstance(module, included_modules):
                 # weights of whitelist modules will be weight decayed
                 decay.add(full_param_name)
-            elif param_name.endswith("weight") and isinstance(module, blacklist_weight_modules):
+            elif param_name.endswith("weight") and isinstance(module, exlcuded_modules):
                 # weights of blacklist modules will NOT be weight decayed
                 no_decay.add(full_param_name)
 

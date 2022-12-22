@@ -7,15 +7,17 @@ model:
   num_layers: 12
   bottleneck_dim: 256
   model_dim: 1536
-  head_dim: 128
+  head_dim: null
   num_heads: 16
-  seq_len: 32
-  max_gen_len: 32
-  max_num_spans: 3  # 9
+  seq_len: 64
+  max_gen_len: ${seq_len}
+  max_num_spans: 3
   num_steps: 1000
   num_gen_steps: 1000
+  use_abs_pos: false
+  use_rotary: true
   guide_scale: null
-  ema_decay: 0.0 # 0.9999
+  ema_decay: 0.999
   ema_every: 1
   noise_schedule: cosine
   use_self_cond: true
@@ -26,11 +28,11 @@ model:
 optimizer:
   type: adamw
   lr: 1e-4
-  lr_scheduler: linear
+  lr_scheduler: cosine
   warmup_steps: 5000
-  weight_decay: 0.001
-  eps: 1e-06
-  betas: [0.9, 0.999]
+  weight_decay: 1e-4
+  eps: 1e-6
+  betas: [0.9, 0.99]
   max_grad_norm: 1.0
 
 train:
@@ -51,7 +53,7 @@ valid:
   max_steps: 1000
 
 data:
-  name: "datasets/roc_stories.py" # imdb
+  name: "datasets/roc_stories.py"
   subset_name: null
   train_name: train
   valid_name: test

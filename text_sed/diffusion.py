@@ -5,8 +5,9 @@ from typing import Callable, Literal, NewType, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import reduce
 
-from text_sed.layers import PretrainedEmbedding, PretrainedUnEmbedding, get_span_mask
+from text_sed.layers import PretrainedEmbedding, PretrainedUnEmbedding, get_span_mask, get_prefix_mask
 
 from . import utils
 
@@ -34,17 +35,17 @@ def cross_entropy_loss(
     if mask is None:
         mask = torch.ones_like(targets)[:, :, None]
 
-    num_ids = mask.sum()
+    num_tokens = mask.sum()
 
     logits -= torch.max(logits, dim=-1, keepdim=True)[0]
     one_hot_targets = F.one_hot(targets, num_classes=logits.shape[-1])
     predicted_logits = torch.sum(one_hot_targets * logits, dim=-1)
     loss = -predicted_logits + torch.logsumexp(logits, dim=-1)
-    loss = torch.sum(loss[:, :, None] * mask) / num_ids
+    loss = torch.sum(loss[:, :, None] * mask) / num_tokens
 
     # Compute the fraction of correct predictions per batch:
     correct = (torch.argmax(logits, dim=-1) == targets).float()[:, :, None]
-    correct = torch.sum(correct * mask) / mask.sum()
+    correct = torch.sum(correct * mask) / num_tokens
     return dict(loss=loss, correct=correct)
 
 
@@ -64,7 +65,6 @@ def get_noise_schedule(schedule_name: str, **kwargs) -> Callable:
 
 def linear_schedule(start: float, end: float) -> Tensor:
     """Linear noise-variance (β) schedule."""
-
     def scheduler(num_steps: int):
         return torch.linspace(start, end, num_steps)
 
@@ -100,7 +100,6 @@ def cosine_alpha_bar_schedule(
         offset: Small offset to prevent βₜ from beeing too small near
             t = 0.
     """
-
     def scheduler(num_steps: float):
         return cosine_alpha_bar(time=num_steps, offset=offset)
 
@@ -218,7 +217,6 @@ class TextSed(nn.Module):
             *[
                 # Bottleneck layer to shrink word embeddings: D → D'
                 nn.Linear(embed_dim, self.hidden_size),
-                # nn.LayerNorm(self.hidden_size),
             ]
             if bottleneck_dim
             else [nn.Identity()],
@@ -252,22 +250,27 @@ class TextSed(nn.Module):
         """
         batch_size, num_pos = input_ids.shape[0], input_ids.shape[1]
         attention_mask: NamedTensor["batch", "pos", "1"] = attention_mask[:, :, None]
-        # utils.print_rank_0(f"input_ids.shape: {input_ids.shape}")
-        # utils.print_rank_0(f"attention_mask.shape: {attention_mask.shape}")
 
         # Discrete-to-continuous data embedding (token/word -> embedding)
         embeds = self.read_in(input_ids)
-        # utils.print_rank_0(f"embeds.shape: {embeds.shape}")
 
         # Get random span masks if not provided
         if cond_mask is None:
             # Conditioning Mask: 0s for condition position and 1s for infilling positions
             # c1 c2 n1 n2 n3 c3 -> 0 0 1 1 1 0
-            cond_mask = get_span_mask(num_pos, max_num_spans=self.max_num_spans)
-            # TODO: When `cond_mask` are batched, replace the first `None` in the next line with `:`
-            cond_mask: NamedTensor["batch", "pos", "1"] = cond_mask[
-                None, :, None
-            ].expand_as(attention_mask)
+            # cond_mask = get_span_mask(num_pos, max_num_spans=self.max_num_spans)
+            # # TODO: When `cond_mask` are batched, replace the first `None` in the next line with `:`
+            # cond_mask: NamedTensor["batch", "pos", "1"] = cond_mask[
+            #     None, :, None
+            # ].expand_as(attention_mask)
+            # TODO: This loop batching is slow! Fix it!
+            cond_mask = torch.stack([
+                # TODO: Make this configurable:
+                # get_prefix_mask(num_pos)
+                get_span_mask(num_pos, max_num_spans=self.max_num_spans)
+                for _ in range(batch_size)
+            ])
+            cond_mask: NamedTensor["batch", "pos", "1"] = cond_mask[:, :, None].expand_as(attention_mask)
 
             # Infilling Mask: 1s for infilling positions and 0s for condition positions
             # c1 c2 n1 n2 n3 c3 -> 1 1 0 0 0 1
@@ -275,20 +278,12 @@ class TextSed(nn.Module):
         else:
             cond_mask: NamedTensor["batch", "pos", "1"] = cond_mask[:, :, None]
 
-        # utils.print_rank_0(f"cond_mask.shape: {cond_mask.shape}")
-        # utils.print_rank_0(f"cond_mask: {cond_mask[0]}")
-        # utils.print_rank_0(f"attention_mask: {attention_mask[0]}")
-
         # Mask out padding positions using the attention mask
         cond_mask = cond_mask.to(attention_mask.device)
         cond_mask = attention_mask * cond_mask
-        # utils.print_rank_0(f"cond_mask * attn mask: {cond_mask[0]}")
-        # utils.print_rank_0(f"~cond_mask * attn mask: {1 - cond_mask[0]}")
 
         # Get the ("clean") conditioning embeddings: c1 c2 n1 n2 n3 c3 -> c1 c2 0 0 0 c3
         cond_embeds = (1 - cond_mask) * embeds * attention_mask  # Remember to re-mask the padding
-        # utils.print_rank_0(f"embeds: {embeds[0]}")
-        # utils.print_rank_0(f"cond_embeds: {cond_embeds[0]}")
 
         # Select random timesteps
         time = torch.rand((batch_size,), device=embeds.device)
@@ -299,28 +294,27 @@ class TextSed(nn.Module):
         if use_self_cond and random.random() > 0.5:
             with torch.no_grad():
                 prev_embeds = self.model(
-                    noisy_embeds=noisy_embeds,  # `x`
-                    prev_embeds=prev_embeds,  # `p`
-                    cond_embeds=cond_embeds,  # `c`
-                    cond_mask=cond_mask,  # `m`
+                    noisy_embeds=noisy_embeds,
+                    prev_embeds=prev_embeds,
+                    cond_mask=cond_mask,
+                    cond_embeds=cond_embeds,
                     time=time,
                 ).detach()
 
         # Predict embeddings
         pred_embeds = self.model(
-            noisy_embeds=noisy_embeds,  # `x`
-            prev_embeds=prev_embeds,  # `p`
-            cond_embeds=cond_embeds,  # `c`
-            cond_mask=cond_mask,  # `m`
+            noisy_embeds=noisy_embeds,
+            prev_embeds=prev_embeds,
+            cond_mask=cond_mask,
+            cond_embeds=cond_embeds,
             time=time,
         )
-        # Diffusion loss (Masked MSE)
-        # NOTE: Only compute mse loss on the infilling positions
-        loss_mse = torch.sum(cond_mask * (pred_embeds - embeds) ** 2) / cond_mask.sum()
+        
+        # Diffusion loss
+        loss_mse = F.mse_loss(pred_embeds, embeds, reduction="mean")
 
-        # Get lm-head logits
-        logits = self.read_out(pred_embeds)
         # Reconstruction loss
+        logits = self.read_out(pred_embeds)
         loss_recon = cross_entropy_loss(logits, targets=input_ids, mask=attention_mask)
 
         total_loss = loss_mse + loss_recon["loss"]
@@ -358,12 +352,11 @@ class TextSed(nn.Module):
             use_clamp: Whether to clamp predicted embeddings to the range
                 [-1, 1] before each diffusion sampling step.
         """
-
         if cond_embeds is None:
             cond_embeds = torch.zeros(shape, device=device)
 
         if cond_mask is None:
-            cond_mask = torch.ones(shape, device=device)
+            cond_mask = torch.ones(shape[:-1], device=device)[..., None]
 
         # Sample start embedding from the normal prior eₜ ~ qₜ
         eₜ_prev = torch.randn(shape, device=device)
@@ -372,15 +365,12 @@ class TextSed(nn.Module):
             # Get time for current and next states
             # (NOTE: (1 - ...) to process in reverse)
             time_now = torch.tensor([1 - step / num_steps], device=device)
-            time_next = torch.tensor(
-                [
-                    torch.maximum(
-                        torch.tensor(1 - (step + 1 + time_delta) / num_steps),
-                        torch.tensor(0.0),
-                    )
-                ],
-                device=device,
-            )
+            time_next = torch.tensor([
+                torch.maximum(
+                    torch.tensor(1 - (step + 1 + time_delta) / num_steps),
+                    torch.tensor(0.0),
+                )
+            ], device=device)
 
             if (
                 guide_scale is not None and cond_embeds is None
@@ -424,38 +414,3 @@ class TextSed(nn.Module):
         logits = self.read_out(pred_eₒ)
         tokens = torch.argmax(logits, -1)
         return tokens
-
-
-# def corrupt(
-#     inputs: Tensor,      # x₀
-#     time: Tensor,        # t
-#     schedule: Callable,  # ᾱ schedule
-#     mask: Optional[Tensor] = None,    # m
-# ) -> Tensor:
-#     """q sampler: q(xₜ | xₒ) ~ N(xₒ * √ᾱₜ, (1 - ᾱₜ)I)
-#     Arbitrary time q-sampler for forward diffusion processing (corruption).
-
-#     Args:
-#         mask: The infilling mask. If None, add noise to all elements.
-#     Reference: Ho et al. "Denoising Diffusion Probabilistic Models". 2020.
-#         https://arxiv.org/abs/2006.11239
-#     """
-#     noise = torch.randn_like(inputs)  # ϵ
-#     if mask is not None:
-#         # Only add noise to infilling positions
-#         noise = mask * noise
-#         # TODO: Do we need to also mask inputs? What does this do the signal rate
-#         # scaled positions?
-#         infill_inputs = mask * inputs
-
-#     signal_rate = torch.sqrt(schedule(time))     # √ᾱₜ
-#     noise_rate = torch.sqrt(1 - schedule(time))  # √(1 - ᾱₜ)
-
-#     signal_rate = utils.append_dims(signal_rate, inputs.ndim)
-#     noise_rate = utils.append_dims(noise_rate, inputs.ndim)
-
-#     # Add Gaussian noise to the embeddings for noisy (infilling) positions
-#     noisy_inputs = signal_rate * infill_inputs + noise_rate * noise
-#     clean_inputs = ~mask * inputs
-#     # Add back the conditionining positions
-#     return noisy_inputs + clean_inputs
