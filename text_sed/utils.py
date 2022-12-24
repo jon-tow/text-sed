@@ -2,21 +2,32 @@ import logging
 import os
 import sys
 from functools import partial
-from typing import *
+from typing import Any, List, Optional, Tuple, Union, NewType
 
-import datasets
 import torch
-import torch.nn as nn
 import torch.distributed as dist
+import torch.nn as nn
 import transformers
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import BatchSampler, RandomSampler
 
+import datasets
 
 logger = logging.getLogger(__name__)
 
 
 Shape = NewType("Shape", Tuple[int, ...])
+
+
+# Lucidrain's `default` and `exists` functions that I always see them use.
+
+
+def default(arg: Any, default: Any) -> Any:
+    return default if arg is None else arg
+
+
+def exists(val: Any) -> bool:
+    return val is not None
 
 
 # Exponential Moving Average
@@ -32,7 +43,7 @@ def ema_update(model: nn.Module, ema_model: nn.Module, decay: float = 0.999) -> 
     assert model_params.keys() == ema_params.keys()
     for name, param in model.named_parameters():
         ema_params[name].mul_(decay).add_(param, alpha=1 - decay)
-    
+
     model_buffers = dict(model.named_buffers())
     ema_buffers = dict(ema_model.named_buffers())
     assert model_buffers.keys() == ema_buffers.keys()
@@ -63,7 +74,7 @@ def get_dtype(
     dtype: Union[str, torch.dtype], config: Optional[transformers.AutoConfig] = None
 ) -> torch.dtype:
     """Converts `str` -> `torch.dtype` when possible."""
-    if dtype is None and config is not None:
+    if dtype is None and exists(config):
         _torch_dtype = config.torch_dtype
     elif isinstance(dtype, str) and dtype != "auto":
         # Convert `str` args torch dtype: `float16` -> `torch.float16`
@@ -91,21 +102,19 @@ def get_grouped_params(
     no_decay = set()
     for module_name, module in model.named_modules():
         for param_name, param in module.named_parameters():
-            full_param_name = "%s.%s" % (module_name, param_name) if module_name else param_name  # full param name
-            # random note: because named_modules and named_parameters are recursive
-            # we will see the same tensors p many many times. but doing it this way
+            full_param_name = "%s.%s" % (module_name, param_name) if module_name else param_name
+            # NOTE: because named_modules and named_parameters are recursive
+            # we will see the same tensors p many many times. Doing it this way
             # allows us to know which parent module any tensor p belongs to...
-            if param_name.endswith("bias") or len(param.shape) == 1:
-                # all biases will not be decayed
+            if param_name.endswith("bias") or param.ndim < 2:
+                # All biases will not be decayed
                 no_decay.add(full_param_name)
             elif param_name.endswith("weight") and isinstance(module, included_modules):
-                # weights of whitelist modules will be weight decayed
                 decay.add(full_param_name)
             elif param_name.endswith("weight") and isinstance(module, exlcuded_modules):
-                # weights of blacklist modules will NOT be weight decayed
                 no_decay.add(full_param_name)
 
-    # validate that we considered every parameter
+    # Validate that we considered every parameter
     param_dict = {pn: p for pn, p in model.named_parameters()}
     inter_params = decay & no_decay
     union_params = decay | no_decay

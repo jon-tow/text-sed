@@ -9,9 +9,9 @@ model:
   model_dim: 1536
   head_dim: null
   num_heads: 16
-  seq_len: 64
+  seq_len: 10
   max_gen_len: ${seq_len}
-  max_num_spans: 3
+  max_num_spans: 1
   num_steps: 1000
   num_gen_steps: 1000
   use_abs_pos: false
@@ -42,7 +42,7 @@ train:
   log_stats: false
   log_every: 100
   save_every: 10000
-  sample_every: 1000
+  sample_every: 500
   num_samples: 8
   checkpoint_path: null
   use_amp: true
@@ -53,12 +53,18 @@ valid:
   max_steps: 1000
 
 data:
-  name: "datasets/roc_stories.py"
-  subset_name: null
-  train_name: train
-  valid_name: test
-  use_auth_token: False
+  train_kwargs:
+    path: "datasets/roc_stories.py"
+    name: null
+    use_auth_token: False  
+    split: "train"
+  valid_kwargs:
+    path: "datasets/roc_stories.py"
+    name: null
+    use_auth_token: False
+    split: "test"
   use_fast_tokenizer: True
+  use_auth_token: False
   num_preprocess_workers: 1
 
 logging:

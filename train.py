@@ -4,18 +4,17 @@ torchrun --nproc_per_node=<N> train.py
 """
 import argparse
 import copy
-import multiprocessing
 import os
 import time
 from typing import *
 
-import datasets
 import omegaconf as oc
 import torch
 import torch.distributed as dist
 import tqdm
 import transformers
 
+import datasets
 import wandb
 from text_sed import diffusion, layers, slurm, utils
 
@@ -35,23 +34,12 @@ def train(
 ):
     # Initialize datasets
     logger.info("📦 Loading dataset...")
-    text_datasets = {
-        "train": datasets.load_dataset(
-            config.data.name,
-            name=config.data.subset_name,
-            use_auth_token=config.data.use_auth_token,
-            split=config.data.train_name,
-        ),
-        "valid": datasets.load_dataset(
-            config.data.name,
-            name=config.data.subset_name,
-            use_auth_token=config.data.use_auth_token,
-            split=config.data.valid_name,
-        ),
-    }
+    text_datasets = {"train": datasets.load_dataset(**config.data.train_kwargs)}
+    if config.data.valid_kwargs:
+        text_datasets["valid"] = datasets.load_dataset(**config.data.valid_kwargs)
 
-    logger.info("📦 Loading dataloaders...")
     # Initialize data loaders
+    logger.info("📦 Loading dataloaders...")
     dataloaders = {
         "train": utils.text_dataloader(
             dataset=text_datasets["train"],
@@ -61,18 +49,23 @@ def train(
             num_workers=config.data.num_preprocess_workers,
             use_infinite_sampler=True,
         ),
-        "valid": utils.text_dataloader(
+    }
+    if config.data.valid_kwargs:
+        dataloaders["valid"] = utils.text_dataloader(
             dataset=text_datasets["valid"],
             tokenizer=tokenizer,
             per_gpu_batch_size=config.valid.batch_size,
             max_seq_len=config.model.seq_len,
             num_workers=config.data.num_preprocess_workers,
             use_infinite_sampler=True,
-        ),
-    }
-    train_iter = iter(dataloaders["train"])
-    # valid_iter = iter(dataloaders["valid"])
+        )
 
+    # Initialize data iterators
+    train_iter = iter(dataloaders["train"])
+    if config.data.valid_kwargs:
+        valid_iter = iter(dataloaders["valid"])
+
+    logger.info("⏳ Begin model training...")
     model.train()
     for step in tqdm.trange(
         step_state,
@@ -83,8 +76,7 @@ def train(
         step += 1
 
         batch = next(train_iter)
-        # TODO: The `BatchSampler` + `DataLoader` prepends an extra dimension to
-        # the data. This is a hack to remove it.
+        # TODO: The `BatchSampler` + `DataLoader` prepends an extra dimension to the data. 
         input_ids = batch["input_ids"][0].to(device)
         attention_mask = batch["attention_mask"][0].to(device)
         with torch.amp.autocast(
@@ -105,35 +97,36 @@ def train(
 
         # Log training stats
         if step % config.train.log_every == 0 and utils.is_main_process():
+            # Log learning across all param groups
+            stats[f"learning_rate"] = lr_scheduler.get_last_lr()[0]
             run.log({f"train/{k}": v for k, v in stats.items()}, step=step)
-            run.log({f"train/loss": loss}, step=step)
             info = f"🎛 Step: {step}/{config.train.max_steps} "
             info += f"𑗔 Loss: {loss:.5f} "
             info += f"𑗔 MSE Loss: {stats['loss_mse']:.5f} "
             info += f"𑗔 Recon Loss: {stats['loss_recon']:.5f} "
-            info += f"𑗔 LR: {lr_scheduler.get_last_lr()[0]:.6f}"
+            info += f"𑗔 LR: {stats['learning_rate']:.6f}"
             logger.info(info)
 
         # Evaluate and log the validation stats
-        if step % config.train.eval_every == 0 and utils.is_main_process():
+        is_eval_step = step % config.train.eval_every == 0 and step > 0 and config.data.valid_kwargs
+        if is_eval_step and utils.is_main_process():
             logger.info(
                 "📊 Evaluating... "
                 "WARNING: Evaluation is slow! Run evaluations on checkpoints instead."
             )
-            # model.eval()
-            # TODO: The `BatchSampler` + `DataLoader` prepends an extra dimension to
-            # the data. This is a hack to remove it.
-            # valid_inputs = next(valid_iter)["input_ids"].to(device)[0]
-            # with torch.no_grad():
-            #     _, valid_stats = model(valid_inputs)
-            # run.log({f"valid/{k}": v for k, v in valid_stats.items()}, step=step)
-            # model.train()
+            model.eval()
+            # TODO: The `BatchSampler` + `DataLoader` prepends an extra dimension to the data.
+            valid_inputs = next(valid_iter)["input_ids"].to(device)[0]
+            with torch.no_grad():
+                _, valid_stats = model(valid_inputs)
+            run.log({f"valid/{k}": v for k, v in valid_stats.items()}, step=step)
+            model.train()
 
         # Generate samples
         is_sample_step = step % config.train.sample_every == 0
         if is_sample_step and utils.is_main_process():
-            model_ema.eval()
             logger.info("💬 Generating samples...")
+            model_ema.eval()
             shape = (
                 config.train.num_samples,
                 config.model.seq_len,
@@ -152,8 +145,12 @@ def train(
                 device=input_ids.device,
             )
             end_time = time.perf_counter()
+            sample_log = "💬 Generating tokens..."
+            for sample in samples:
+                sample_log += f"\n➜ {sample}"
             samples = tokenizer.batch_decode(samples, skip_secial_tokens=True)
-            sample_log = "💬 Generating samples..."
+            sample_log += "\n"
+            sample_log += "💬 Decoding tokens..."
             for sample in samples:
                 sample_log += f"\n➜ {sample}"
             logger.info(sample_log)
@@ -286,7 +283,7 @@ if __name__ == "__main__":
     scaler = torch.cuda.amp.GradScaler(enabled=config.train.use_amp)
 
     logger.info(f"🏘 Inner Model: {inner_model}")
-    logger.info(f"👾 Parameter count: ~{format(utils.param_count(model), ',')}")
+    logger.info(f"👾 Parameter Count: ~{format(utils.param_count(model), ',')}")
 
     if torch.cuda.is_available():
         model.cuda()
