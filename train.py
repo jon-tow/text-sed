@@ -6,7 +6,7 @@ import argparse
 import copy
 import os
 import time
-from typing import *
+from typing import Optional, Union
 
 import omegaconf as oc
 import torch
@@ -28,9 +28,9 @@ def train(
     lr_scheduler: torch.optim.lr_scheduler._LRScheduler,
     scaler: torch.cuda.amp.GradScaler,
     tokenizer: transformers.PreTrainedTokenizer,
-    step_state: Optional[int] = 0,
+    step_state: int = 0,
     run: Optional["wandb.Run"] = None,
-    device: Optional[Union[torch.device, str]] = "cuda:0",
+    device: Union[torch.device, str] = "cuda:0",
 ):
     # Initialize datasets
     logger.info("📦 Loading dataset...")
@@ -76,9 +76,9 @@ def train(
         step += 1
 
         batch = next(train_iter)
-        # TODO: The `BatchSampler` + `DataLoader` prepends an extra dimension to the data. 
+        # TODO: The `BatchSampler` + `DataLoader` prepends an extra dimension to the data.
         input_ids = batch["input_ids"][0].to(device)
-        attention_mask = batch["attention_mask"][0].to(device)
+        attention_mask = None  # batch["attention_mask"][0].to(device)
         with torch.amp.autocast(
             device_type="cuda", dtype=utils.get_dtype(config.train.dtype)
         ):
@@ -98,7 +98,7 @@ def train(
         # Log training stats
         if step % config.train.log_every == 0 and utils.is_main_process():
             # Log learning across all param groups
-            stats[f"learning_rate"] = lr_scheduler.get_last_lr()[0]
+            stats["learning_rate"] = lr_scheduler.get_last_lr()[0]
             run.log({f"train/{k}": v for k, v in stats.items()}, step=step)
             info = f"🎛 Step: {step}/{config.train.max_steps} "
             info += f"𑗔 Loss: {loss:.5f} "
@@ -135,7 +135,7 @@ def train(
                 else embed_dim,
             )
             start_time = time.perf_counter()
-            samples = model_ema.module.generate(
+            batched_tokens = model_ema.module.generate(
                 shape=shape,
                 num_steps=config.model.num_gen_steps,
                 sampler=diffusion.get_sampler(config.model.sampler),
@@ -146,9 +146,9 @@ def train(
             )
             end_time = time.perf_counter()
             sample_log = "💬 Generating tokens..."
-            for sample in samples:
-                sample_log += f"\n➜ {sample}"
-            samples = tokenizer.batch_decode(samples, skip_secial_tokens=True)
+            for tokens in batched_tokens:
+                sample_log += f"\n➜ {tokens}"
+            samples = tokenizer.batch_decode(batched_tokens, skip_special_tokens=True)
             sample_log += "\n"
             sample_log += "💬 Decoding tokens..."
             for sample in samples:
@@ -256,8 +256,7 @@ if __name__ == "__main__":
     model = diffusion.TextSed(
         model=inner_model,
         embed_mat=embed_mat,
-        noise_schedule=diffusion.get_noise_schedule(
-            config.model.noise_schedule),
+        noise_schedule=diffusion.get_noise_schedule(config.model.noise_schedule),
         bottleneck_dim=config.model.bottleneck_dim,
         max_num_spans=config.model.max_num_spans,
     )

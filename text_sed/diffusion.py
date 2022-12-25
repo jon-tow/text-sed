@@ -265,7 +265,7 @@ class TextSed(nn.Module):
     def forward(
         self,
         input_ids: NamedTensor["batch", "pos", "embed"],
-        attention_mask: NamedTensor["batch", "pos"],
+        attention_mask: Optional[NamedTensor["batch", "pos"]] = None,
         cond_mask: Optional[NamedTensor["batch", "pos"]] = None,
         use_self_cond: bool = True,
     ) -> NamedTensor["batch", "pos", "embed"]:
@@ -276,6 +276,8 @@ class TextSed(nn.Module):
             cond_mask: Mask with 1s for condition positions and 0s for infilling positions.
         """
         batch_size, num_pos = input_ids.shape[0], input_ids.shape[1]
+        attention_mask = utils.default(
+            attention_mask, torch.ones((batch_size, num_pos), device=input_ids.device))
 
         # Discrete-to-continuous token embeddings
         embeds = self.read_in(input_ids)
