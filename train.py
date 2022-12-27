@@ -281,7 +281,9 @@ if __name__ == "__main__":
         num_warmup_steps=config.optimizer.warmup_steps,
         num_training_steps=config.train.total_steps,
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=config.train.use_amp)
+    scaler = torch.cuda.amp.GradScaler(
+        enabled=config.train.use_amp and config.train.dtype in ("half", "float16")
+    )
 
     logger.info(f"🏘 Inner Model: {inner_model}")
     logger.info(f"👾 Parameter Count: ~{format(utils.param_count(model), ',')}")
