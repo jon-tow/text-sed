@@ -2,7 +2,7 @@ import logging
 import os
 import sys
 from functools import partial
-from typing import Any, List, Optional, Tuple, Union, NewType
+from typing import Any, List, NewType, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -17,6 +17,40 @@ logger = logging.getLogger(__name__)
 
 
 Shape = NewType("Shape", Tuple[int, ...])
+
+
+def get_timestamp() -> str:
+    import datetime
+
+    return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def set_seed(seed: int, use_device_specific_seeds: bool = False):
+    import random
+
+    import numpy as np
+
+    if use_device_specific_seeds:
+        seed = get_rank() + seed
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+
+def get_dtype(
+    dtype: Union[str, torch.dtype],
+    config: Optional[transformers.AutoConfig] = None
+) -> torch.dtype:
+    """Converts `str` -> `torch.dtype` when possible."""
+    if dtype is None and exists(config):
+        _torch_dtype = config.torch_dtype
+    elif isinstance(dtype, str) and dtype != "auto":
+        # Convert `str` args torch dtype: `float16` -> `torch.float16`
+        _torch_dtype = getattr(torch, dtype)
+    else:
+        _torch_dtype = dtype
+    return _torch_dtype
 
 
 # Lucidrain's `default` and `exists` functions that I always see them use.
@@ -51,37 +85,7 @@ def ema_update(model: nn.Module, ema_model: nn.Module, decay: float = 0.999) -> 
         ema_buffers[name].copy_(buffer)
 
 
-def get_timestamp() -> str:
-    import datetime
-
-    return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-
-def set_seed(seed: int, use_device_specific_seeds: bool = False):
-    import random
-
-    import numpy as np
-
-    if use_device_specific_seeds:
-        seed = get_rank() + seed
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-
-
-def get_dtype(
-    dtype: Union[str, torch.dtype], config: Optional[transformers.AutoConfig] = None
-) -> torch.dtype:
-    """Converts `str` -> `torch.dtype` when possible."""
-    if dtype is None and exists(config):
-        _torch_dtype = config.torch_dtype
-    elif isinstance(dtype, str) and dtype != "auto":
-        # Convert `str` args torch dtype: `float16` -> `torch.float16`
-        _torch_dtype = getattr(torch, dtype)
-    else:
-        _torch_dtype = dtype
-    return _torch_dtype
+# Modeling utils
 
 
 def param_count(model: torch.nn.Module) -> int:
@@ -118,12 +122,8 @@ def get_grouped_params(
     param_dict = {pn: p for pn, p in model.named_parameters()}
     inter_params = decay & no_decay
     union_params = decay | no_decay
-    assert (
-        len(inter_params) == 0
-    ), "parameters %s made it into both decay/no_decay sets!" % (str(inter_params),)
-    assert (
-        len(param_dict.keys() - union_params) == 0
-    ), "parameters %s were not separated into either decay/no_decay set!" % (
+    assert len(inter_params) == 0, "parameters %s made it into both decay/no_decay sets!" % (str(inter_params),)
+    assert len(param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" % (
         str(param_dict.keys() - union_params),
     )
     optim_groups = [
@@ -146,8 +146,8 @@ def tokenize_fn(
     examples: List[dict],
     max_length: int,
     tokenizer: Any,
-    text_attr: Optional[str] = "text",
-    padding: Optional[str] = "max_length",
+    text_attr: str = "text",
+    padding: str = "max_length",
 ):
     return tokenizer(
         examples[text_attr],
@@ -164,11 +164,17 @@ def text_dataloader(
     tokenizer: Any,
     per_gpu_batch_size: int,
     max_seq_len: int,
-    num_workers: Optional[int] = 1,
+    num_workers: int = 1,
     use_infinite_sampler: bool = False,
+    text_attr: str = "text",
 ):
     tokenized_dataset = dataset.map(
-        partial(tokenize_fn, tokenizer=tokenizer, max_length=max_seq_len),
+        partial(
+            tokenize_fn,
+            tokenizer=tokenizer,
+            max_length=max_seq_len,
+            text_attr=text_attr,
+        ),
         batched=True,
         num_proc=num_workers,
     )
@@ -200,7 +206,7 @@ def text_dataloader(
     return dataloader
 
 
-def flatten_dict(d: dict, parent_key: Optional[str] = "") -> dict:
+def flatten_dict(d: dict, parent_key: str = "") -> dict:
     """
     Flattens a dict-of-dicts, replacing any nested key names with that name
     prepended with the parents' key names.
@@ -220,9 +226,7 @@ def append_dims(x: torch.Tensor, target_dims: int) -> torch.Tensor:
     """
     dims_to_append = target_dims - x.ndim
     if dims_to_append < 0:
-        raise ValueError(
-            f"input has {x.ndim} dims but target_dims is {target_dims}, which is less"
-        )
+        raise ValueError(f"input has {x.ndim} dims but target_dims is {target_dims}, which is less")
     return x[(...,) + (None,) * dims_to_append]
 
 

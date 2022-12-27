@@ -1,11 +1,10 @@
 """Modified version of https://huggingface.co/datasets/adamlin/roc_story/blob/main/roc_story.py"""
-from pathlib import Path
 from typing import Set
 
-import datasets
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
+import datasets
 
 _URL = ["https://ytlin.s3.ap-northeast-1.amazonaws.com/data/huggingface_datasets/ROCStories/ROCStories2016.csv",
         "https://ytlin.s3.ap-northeast-1.amazonaws.com/data/huggingface_datasets/ROCStories/ROCStories2017.csv"]
@@ -70,7 +69,7 @@ class RocStories(datasets.GeneratorBasedBuilder):
                 row["sentence3"],
                 row["sentence4"],
                 row["sentence5"],
-            ] 
+            ]
             row["text"] = f" ".join(sentences)
             id_ += 1
             yield id_, row

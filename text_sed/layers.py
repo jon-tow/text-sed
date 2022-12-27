@@ -11,7 +11,6 @@ from einops import rearrange
 
 import text_sed.utils as utils
 
-
 DType = NewType("DType", torch.dtype)
 Shape = NewType("Shape", Tuple[int, ...])
 Tensor = NewType("Tensor", torch.Tensor)
@@ -141,11 +140,11 @@ class RotaryPositionalEmbedding(nn.Module):
         self,
         dim: int,
         max_period: int = 10_000,
-        precision: torch.dtype = torch.half
+        precision: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
-        inv_freq = 1. / (max_period ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer('inv_freq', inv_freq)
+        inv_freq = 1.0 / (max_period ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
         self.seq_len_cached = None
         self.cos_cached = None
         self.sin_cached = None
@@ -160,7 +159,7 @@ class RotaryPositionalEmbedding(nn.Module):
         if seq_len != self.seq_len_cached:
             self.seq_len_cached = seq_len
             t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
-            freqs = torch.einsum('i , j -> i j', t, self.inv_freq)
+            freqs = torch.einsum("i , j -> i j", t, self.inv_freq)
             embeds = torch.cat((freqs, freqs), dim=-1).to(x.device)
             if self.precision == torch.bfloat16:
                 embeds = embeds.float()
@@ -184,7 +183,7 @@ def fixed_positional_embedding(
 
 
 class FixedPositionalEmbedding(nn.Module):
-    def __init__(self, dim: int, max_period: Optional[int] = 10_000):
+    def __init__(self, dim: int, max_period: int = 10_000):
         super().__init__()
         self.dim = dim
         self.max_period = max_period
@@ -192,7 +191,7 @@ class FixedPositionalEmbedding(nn.Module):
     def forward(
         self,
         input: NamedTensor["...", "pos", "dim"],
-        seq_dim: Optional[int] = -2,
+        seq_dim: int = -2,
     ) -> NamedTensor["...", "pos", "dim"]:
         """Returns the sinuosidal position embeddings for the given input."""
         sincos = fixed_positional_embedding(
@@ -249,7 +248,7 @@ class RandomFourierEmbedding(nn.Module):
 
 
 class SinusoidalTimeEmbedding(nn.Module):
-    def __init__(self, dim: int, max_period: Optional[int] = 10_000):
+    def __init__(self, dim: int, max_period: int = 10_000):
         super().__init__()
         self.dim = dim
         self.max_period = max_period
@@ -272,7 +271,7 @@ class TimeEmbedding(nn.Module):
         dim: int,
         ff_mult: int = 1,
         use_fourier: bool = True,
-        max_period: Optional[int] = 10_000,
+        max_period: int = 10_000,
     ):
         super().__init__()
         time_dim = ff_mult * dim
@@ -303,12 +302,14 @@ def multihead_attn(
     k: Tensor,
     v: Tensor,
     softmax_scale: float,
-    bias: Optional[Tensor] = 0.0,
+    bias: Tensor = 0.0,
 ) -> Tensor:
     """Scaled Dot-Product Attention ("Soft Look-Up Table")."""
     score = torch.einsum(
         "... h s d, ... h S d -> ... h s S",
-        q * softmax_scale, k * softmax_scale  # Scale before softmax for numerical stability
+        # Scale before softmax for numerical stability
+        q * softmax_scale,
+        k * softmax_scale,
     )
     score = score + bias
     weight = F.softmax(score, dim=-1)
@@ -349,7 +350,8 @@ class ParallelEncoderBlock(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = utils.default(head_dim, model_dim // num_heads)
-        self.softmax_scale = self.head_dim ** (-0.5)  # Scaled dot-product attention factor: 1 / √dₖ
+        # Scaled dot-product attention factor: 1 / √dₖ
+        self.softmax_scale = self.head_dim ** -0.5
         self.norm = nn.LayerNorm(model_dim)
         self.act = FusedGELU()
 
@@ -426,8 +428,7 @@ class MaskConditionalTransformer(nn.Module):
         self.num_layers = num_layers
 
         self.time_embed = TimeEmbedding(model_dim)
-        self.pos_embed = LearnedAbsolutePositionalEmbedding(model_dim, max_seq_len) \
-            if use_abs_pos else None
+        self.pos_embed = LearnedAbsolutePositionalEmbedding(model_dim, max_seq_len) if use_abs_pos else None
 
         # 2x b/c of self-conditioning concat of input and condition signal
         self.in_proj = nn.Linear(4 * embed_dim, model_dim, bias=True)
@@ -467,12 +468,12 @@ class MaskConditionalTransformer(nn.Module):
             prev_embeds: Previous predicted embeddings for self-conditioning.
             infill_mask: Boolean conditioning mask, indicating which tokens are given:
                 (‘clean’, 𝑚𝑖 = 0) and which are to be generated (‘noisy’, 𝑚𝑖 = 1).
-                NOTE: `infill_mask` should also mask padding positions.
         """
-        time_embeds = rearrange(self.time_embed(time), "... d -> ... 1 d")
+        min_val = torch.finfo(noisy_embeds.dtype).min
+        attention_mask: NamedTensor["batch", "1", "pos", "1"] = (1 - infill_mask[:, None, :, :]) * min_val
         expanded_infill_mask: NamedTensor["batch", "pos", "dim"] = infill_mask.expand_as(noisy_embeds)
-        attention_mask: NamedTensor["batch", "1", "pos", "1"] = (1 - infill_mask[:, None, :, :]) * -1e7
 
+        time_embeds = rearrange(self.time_embed(time), "... d -> ... 1 d")
         embeds_proj = self.in_proj(
             torch.concat([
                 noisy_embeds,
@@ -509,7 +510,7 @@ def get_prefix_mask(seq_len: int, rate: float = 0.75) -> torch.Tensor:
     prefix_len = random.randint(0, int(seq_len * rate) - 1)
     if random.random() > 0.5:
         return torch.ones((seq_len), dtype=torch.bool)
-    return (indices > prefix_len)
+    return indices > prefix_len
 
 
 def get_span_mask(seq_len: int, max_num_spans: int) -> Tensor:
@@ -551,7 +552,7 @@ def get_span_mask(seq_len: int, max_num_spans: int) -> Tensor:
     i_span_starts = list(enumerate(span_starts))
     for i, start in i_span_starts[:-1]:
         if i % 2 == 0:
-            mask[start:span_starts[i + 1]] = True
+            mask[start : span_starts[i + 1]] = True
     last_i, last_span_start = i_span_starts[-1]
     if last_i % 2 == 0:
         mask[last_span_start:] = True

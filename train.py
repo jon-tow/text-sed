@@ -48,6 +48,7 @@ def train(
             max_seq_len=config.model.seq_len,
             num_workers=config.data.num_preprocess_workers,
             use_infinite_sampler=True,
+            text_attr=config.data.text_attr,
         ),
     }
     if config.data.valid_kwargs:
@@ -58,6 +59,7 @@ def train(
             max_seq_len=config.model.seq_len,
             num_workers=config.data.num_preprocess_workers,
             use_infinite_sampler=True,
+            text_attr=config.data.text_attr,
         )
 
     # Initialize data iterators
@@ -69,7 +71,7 @@ def train(
     model.train()
     for step in tqdm.trange(
         step_state,
-        config.train.max_steps,
+        config.train.total_steps,
         initial=step_state,
         disable=not utils.is_main_process(),
     ):
@@ -100,7 +102,7 @@ def train(
             # Log learning across all param groups
             stats["learning_rate"] = lr_scheduler.get_last_lr()[0]
             run.log({f"train/{k}": v for k, v in stats.items()}, step=step)
-            info = f"🎛 Step: {step}/{config.train.max_steps} "
+            info = f"🎛 Step: {step}/{config.train.total_steps} "
             info += f"𑗔 Loss: {loss:.5f} "
             info += f"𑗔 MSE Loss: {stats['loss_mse']:.5f} "
             info += f"𑗔 Recon Loss: {stats['loss_recon']:.5f} "
@@ -277,7 +279,7 @@ if __name__ == "__main__":
         name=config.optimizer.lr_scheduler,
         optimizer=optimizer,
         num_warmup_steps=config.optimizer.warmup_steps,
-        num_training_steps=config.train.max_steps,
+        num_training_steps=config.train.total_steps,
     )
     scaler = torch.cuda.amp.GradScaler(enabled=config.train.use_amp)
 

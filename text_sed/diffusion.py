@@ -15,7 +15,6 @@ from text_sed.layers import (
 
 from . import utils
 
-
 Device = NewType("Device", torch.device)
 DType = NewType("DType", torch.dtype)
 Shape = NewType("Shape", Tuple[int, ...])
@@ -68,6 +67,7 @@ def get_noise_schedule(name: str, **kwargs) -> Callable:
 
 def linear_schedule(start: float, end: float) -> Tensor:
     """Linear noise-variance (β) schedule."""
+
     def scheduler(num_steps: int):
         return torch.linspace(start, end, num_steps)
 
@@ -76,7 +76,7 @@ def linear_schedule(start: float, end: float) -> Tensor:
 
 def cosine_alpha_bar(
     time: float,
-    offset: Optional[float] = 0.0002,
+    offset: float = 0.0002,
 ) -> Tensor:
     """Cosine noise-variance ᾱ scheduler (ᾱ[t] = Πᵗα[i] where α[i] = (1 - β[i]))
     for continuous time parameterization.
@@ -92,7 +92,7 @@ def cosine_alpha_bar(
 
 
 def cosine_alpha_bar_schedule(
-    offset: Optional[float] = 0.0002,
+    offset: float = 0.0002,
 ) -> Tensor:
     """Cosine noise-variance (β) scheduler
 
@@ -103,6 +103,7 @@ def cosine_alpha_bar_schedule(
         offset: Small offset to prevent βₜ from beeing too small near
             t = 0.
     """
+
     def scheduler(num_steps: float):
         return cosine_alpha_bar(time=num_steps, offset=offset)
 
@@ -174,8 +175,8 @@ def ddpm_step(
 
 
 def corrupt(
-    inputs: Tensor,      # x₀
-    time: Tensor,        # t
+    inputs: Tensor,  # x₀
+    time: Tensor,  # t
     schedule: Callable,  # ᾱ schedule
 ) -> Tensor:
     """q sampler: q(xₜ | xₒ) ~ N(xₒ * √ᾱₜ, (1 - ᾱₜ)I)
@@ -186,7 +187,7 @@ def corrupt(
     """
     noise = torch.randn_like(inputs)  # ϵ
 
-    signal_rate = torch.sqrt(schedule(time))     # √ᾱₜ
+    signal_rate = torch.sqrt(schedule(time))  # √ᾱₜ
     noise_rate = torch.sqrt(1 - schedule(time))  # √(1 - ᾱₜ)
 
     signal_rate = utils.append_dims(signal_rate, inputs.ndim)
@@ -257,9 +258,13 @@ class TextSed(nn.Module):
         masks = []
         for _ in range(batch_size):
             if self.mask_type == "span":
-                masks.append(get_span_mask(num_pos, max_num_spans=self.mask_max_num_spans))
+                masks.append(
+                    get_span_mask(num_pos, max_num_spans=self.mask_max_num_spans)
+                )
             elif self.mask_type == "prefix":
-                masks.append(get_prefix_mask(num_pos, prefix_rate=self.mask_prefix_rate))
+                masks.append(
+                    get_prefix_mask(num_pos, prefix_rate=self.mask_prefix_rate)
+                )
         return torch.stack(masks).to(device)
 
     def forward(
@@ -277,7 +282,8 @@ class TextSed(nn.Module):
         """
         batch_size, num_pos = input_ids.shape[0], input_ids.shape[1]
         attention_mask = utils.default(
-            attention_mask, torch.ones((batch_size, num_pos), device=input_ids.device))
+            attention_mask, torch.ones((batch_size, num_pos), device=input_ids.device)
+        )
 
         # Discrete-to-continuous token embeddings
         embeds = self.read_in(input_ids)
@@ -290,7 +296,7 @@ class TextSed(nn.Module):
         attention_mask: NamedTensor["batch", "pos", "1"] = attention_mask[..., None]
         cond_mask = utils.default(
             cond_mask,
-            self._get_conditioning_mask(batch_size, num_pos, device=input_ids.device)
+            self._get_conditioning_mask(batch_size, num_pos, device=input_ids.device),
         )
         cond_mask: NamedTensor["batch", "pos", "1"] = cond_mask[..., None]
         # Remove padding positions from the conditioning/infilling masks

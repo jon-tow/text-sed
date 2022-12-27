@@ -28,7 +28,7 @@ def generate(
     model: torch.nn.Module,
     shape: Tuple[int, int, int],
     tokenizer: transformers.PreTrainedTokenizer,
-    device: Optional[Union[torch.device, str]] = "cuda:0",
+    device: Union[torch.device, str] = "cuda:0",
 ):
     model.eval()
     start_time = time.perf_counter()
