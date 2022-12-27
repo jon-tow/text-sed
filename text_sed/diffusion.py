@@ -187,7 +187,7 @@ def corrupt(
     """
     noise = torch.randn_like(inputs)  # ϵ
 
-    signal_rate = torch.sqrt(schedule(time))  # √ᾱₜ
+    signal_rate = torch.sqrt(schedule(time))     # √ᾱₜ
     noise_rate = torch.sqrt(1 - schedule(time))  # √(1 - ᾱₜ)
 
     signal_rate = utils.append_dims(signal_rate, inputs.ndim)
@@ -372,7 +372,8 @@ class TextSed(nn.Module):
             use_clamp: Whether to clamp predicted embeddings to the range
                 [-1, 1] before each diffusion sampling step.
         """
-        cond_mask = utils.default(cond_mask, torch.zeros(shape[:-1], device=device)[..., None]).bool()
+        default_cond_mask = torch.zeros(shape[:-1], device=device)[..., None]
+        cond_mask = utils.default(cond_mask, default_cond_mask).bool()
         infill_mask = (~cond_mask).float()
 
         # Sample start embedding from the normal prior eₜ ~ qₜ
@@ -381,12 +382,15 @@ class TextSed(nn.Module):
         for step in range(num_steps):
             # Get time for current and next states. NOTE: (1 - ...) to process in reverse
             time_now = torch.tensor([1 - step / num_steps], device=device)
-            time_next = torch.tensor([
-                torch.maximum(
-                    torch.tensor(1 - (step + 1 + time_delta) / num_steps),
-                    torch.tensor(0.0),
-                )
-            ], device=device)
+            time_next = torch.tensor(
+                [
+                    torch.maximum(
+                        torch.tensor(1 - (step + 1 + time_delta) / num_steps),
+                        torch.tensor(0.0),
+                    )
+                ],
+                device=device,
+            )
 
             # if (
             #     guide_scale is not None and cond_mask is None

@@ -5,13 +5,13 @@ seed: 2617
 model:
   embed_model_name: bert-large-cased
   num_layers: 12
-  bottleneck_dim: 256
+  bottleneck_dim: 128
   model_dim: 1536
   head_dim: null
   num_heads: 16
-  seq_len: 10
+  seq_len: 64
   max_gen_len: ${seq_len}
-  max_num_spans: 1
+  max_num_spans: 2
   num_steps: 1000
   num_gen_steps: 1000
   use_abs_pos: false
@@ -23,26 +23,25 @@ model:
   use_self_cond: true
   time_delta: 0.0
   sampler: ddim
-  # dropout: 0.1
 
 optimizer:
   type: adamw
   lr: 1e-4
   lr_scheduler: cosine
-  warmup_steps: 5000
+  warmup_steps: 10000
   weight_decay: 1e-4
-  eps: 1e-6
+  eps: 1e-8
   betas: [0.9, 0.99]
   max_grad_norm: 1.0
 
 train:
-  batch_size: 256
-  max_steps: 500000
-  eval_every: 1000
-  log_stats: false
+  batch_size: 128
+  total_steps: 200000
+  eval_every: 5000
   log_every: 100
+  log_stats: false
   save_every: 10000
-  sample_every: 500
+  sample_every: 1000
   num_samples: 8
   checkpoint_path: null
   use_amp: true
@@ -56,19 +55,16 @@ data:
   train_kwargs:
     path: "datasets/roc_stories.py"
     name: null
-    use_auth_token: False  
-    split: "train"
-  valid_kwargs:
-    path: "datasets/roc_stories.py"
-    name: null
     use_auth_token: False
-    split: "test"
+    split: "train"
+  valid_kwargs: {}
   use_fast_tokenizer: True
   use_auth_token: False
   num_preprocess_workers: 1
+  text_attr: "text"
 
 logging:
   wandb_id: null
-  wandb_entity: "jon-tow"
+  wandb_entity: null
   wandb_project: ${name}
   wandb_group: "Processes"

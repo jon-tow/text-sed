@@ -83,9 +83,7 @@ if __name__ == "__main__":
 
     embed_mat, embed_dim = layers.auto_extract_embed_mat(config.model.embed_model_name)
     inner_model = layers.MaskConditionalTransformer(
-        embed_dim=config.model.bottleneck_dim
-        if config.model.bottleneck_dim
-        else embed_dim,
+        embed_dim=utils.default(config.model.bottleneck_dim, embed_dim),
         model_dim=config.model.model_dim,
         max_seq_len=config.model.seq_len,
         head_dim=config.model.head_dim,
@@ -108,7 +106,7 @@ if __name__ == "__main__":
     shape = (
         config.train.num_samples,
         config.model.seq_len,
-        config.model.bottleneck_dim if config.model.bottleneck_dim else embed_dim,
+        utils.default(config.model.bottleneck_dim, embed_dim),
     )
     logger.info("🏁 Starting generation...")
     generate(config, model, shape, tokenizer, device=args.device)

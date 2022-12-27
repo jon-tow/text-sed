@@ -40,7 +40,7 @@ def set_seed(seed: int, use_device_specific_seeds: bool = False):
 
 def get_dtype(
     dtype: Union[str, torch.dtype],
-    config: Optional[transformers.AutoConfig] = None
+    config: Optional[transformers.AutoConfig] = None,
 ) -> torch.dtype:
     """Converts `str` -> `torch.dtype` when possible."""
     if dtype is None and exists(config):
@@ -106,7 +106,9 @@ def get_grouped_params(
     no_decay = set()
     for module_name, module in model.named_modules():
         for param_name, param in module.named_parameters():
-            full_param_name = "%s.%s" % (module_name, param_name) if module_name else param_name
+            full_param_name = (
+                "%s.%s" % (module_name, param_name) if module_name else param_name
+            )
             # NOTE: because named_modules and named_parameters are recursive
             # we will see the same tensors p many many times. Doing it this way
             # allows us to know which parent module any tensor p belongs to...
@@ -122,8 +124,12 @@ def get_grouped_params(
     param_dict = {pn: p for pn, p in model.named_parameters()}
     inter_params = decay & no_decay
     union_params = decay | no_decay
-    assert len(inter_params) == 0, "parameters %s made it into both decay/no_decay sets!" % (str(inter_params),)
-    assert len(param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" % (
+    assert (
+        len(inter_params) == 0
+    ), "parameters %s made it into both decay/no_decay sets!" % (str(inter_params),)
+    assert (
+        len(param_dict.keys() - union_params) == 0
+    ), "parameters %s were not separated into either decay/no_decay set!" % (
         str(param_dict.keys() - union_params),
     )
     optim_groups = [
@@ -226,7 +232,9 @@ def append_dims(x: torch.Tensor, target_dims: int) -> torch.Tensor:
     """
     dims_to_append = target_dims - x.ndim
     if dims_to_append < 0:
-        raise ValueError(f"input has {x.ndim} dims but target_dims is {target_dims}, which is less")
+        raise ValueError(
+            f"input has {x.ndim} dims but target_dims is {target_dims}, which is less"
+        )
     return x[(...,) + (None,) * dims_to_append]
 
 

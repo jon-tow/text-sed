@@ -61,7 +61,9 @@ def init_distributed_mode(args):
         args.world_size = int(os.environ["SLURM_NTASKS"])
 
         # define master address and master port
-        hostnames = subprocess.check_output(["scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]])
+        hostnames = subprocess.check_output(
+            ["scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]]
+        )
         args.master_addr = hostnames.split()[0].decode("utf-8")
         assert 10001 <= args.master_port <= 20000 or args.world_size == 1
 

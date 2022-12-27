@@ -151,9 +151,7 @@ class RotaryPositionalEmbedding(nn.Module):
         self.precision = precision
 
     def forward(
-        self,
-        x: NamedTensor["batch", "heads", "pos", "dim"],
-        seq_dim: int = -2
+        self, x: NamedTensor["batch", "heads", "pos", "dim"], seq_dim: int = -2
     ) -> NamedTensor["1", "1", "pos", "dim"]:
         seq_len = x.shape[seq_dim]
         if seq_len != self.seq_len_cached:
@@ -351,7 +349,7 @@ class ParallelEncoderBlock(nn.Module):
         self.num_heads = num_heads
         self.head_dim = utils.default(head_dim, model_dim // num_heads)
         # Scaled dot-product attention factor: 1 / √dₖ
-        self.softmax_scale = self.head_dim ** -0.5
+        self.softmax_scale = self.head_dim**-0.5
         self.norm = nn.LayerNorm(model_dim)
         self.act = FusedGELU()
 
@@ -428,7 +426,11 @@ class MaskConditionalTransformer(nn.Module):
         self.num_layers = num_layers
 
         self.time_embed = TimeEmbedding(model_dim)
-        self.pos_embed = LearnedAbsolutePositionalEmbedding(model_dim, max_seq_len) if use_abs_pos else None
+        self.pos_embed = (
+            LearnedAbsolutePositionalEmbedding(model_dim, max_seq_len)
+            if use_abs_pos
+            else None
+        )
 
         # 2x b/c of self-conditioning concat of input and condition signal
         self.in_proj = nn.Linear(4 * embed_dim, model_dim, bias=True)
@@ -491,7 +493,7 @@ class MaskConditionalTransformer(nn.Module):
             hidden_states = block(
                 hidden_states,
                 attention_mask=attention_mask,
-                time_embeds=time_embeds
+                time_embeds=time_embeds,
             )
         hidden_states = self.out_proj(hidden_states)
         return self.final_norm(hidden_states)

@@ -6,8 +6,10 @@ from sklearn.model_selection import train_test_split
 
 import datasets
 
-_URL = ["https://ytlin.s3.ap-northeast-1.amazonaws.com/data/huggingface_datasets/ROCStories/ROCStories2016.csv",
-        "https://ytlin.s3.ap-northeast-1.amazonaws.com/data/huggingface_datasets/ROCStories/ROCStories2017.csv"]
+_URL = [
+    "https://ytlin.s3.ap-northeast-1.amazonaws.com/data/huggingface_datasets/ROCStories/ROCStories2016.csv",
+    "https://ytlin.s3.ap-northeast-1.amazonaws.com/data/huggingface_datasets/ROCStories/ROCStories2017.csv",
+]
 
 
 class RocStories(datasets.GeneratorBasedBuilder):

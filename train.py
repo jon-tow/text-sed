@@ -8,14 +8,14 @@ import os
 import time
 from typing import Optional, Union
 
+import datasets
 import omegaconf as oc
 import torch
 import torch.distributed as dist
 import tqdm
 import transformers
-
-import datasets
 import wandb
+
 from text_sed import diffusion, layers, slurm, utils
 
 
@@ -132,9 +132,7 @@ def train(
             shape = (
                 config.train.num_samples,
                 config.model.seq_len,
-                config.model.bottleneck_dim
-                if config.model.bottleneck_dim
-                else embed_dim,
+                utils.default(config.model.bottleneck_dim, embed_dim),
             )
             start_time = time.perf_counter()
             batched_tokens = model_ema.module.generate(
@@ -147,18 +145,12 @@ def train(
                 device=input_ids.device,
             )
             end_time = time.perf_counter()
-            sample_log = "💬 Generating tokens..."
-            for tokens in batched_tokens:
-                sample_log += f"\n➜ {tokens}"
+            sample_log = "💬 Generating samples..."
             samples = tokenizer.batch_decode(batched_tokens, skip_special_tokens=True)
-            sample_log += "\n"
-            sample_log += "💬 Decoding tokens..."
             for sample in samples:
                 sample_log += f"\n➜ {sample}"
             logger.info(sample_log)
-            logger.info(
-                f"🕒 Generation took {end_time - start_time:.2f} seconds."
-            )
+            logger.info(f"🕒 Generation took {end_time - start_time:.2f} seconds.")
             model_ema.train()
 
         # Save checkpoints
@@ -198,9 +190,7 @@ if __name__ == "__main__":
     else:
         # Add timestamp to checkpoint dir name
         # TODO: There's probably a better way to do this...
-        oc.OmegaConf.update(
-            config, "output_dir", f"{config.output_dir}-{utils.get_timestamp()}"
-        )
+        oc.OmegaConf.update(config, "output_dir", f"{config.output_dir}-{utils.get_timestamp()}")
 
     os.makedirs(config.output_dir, exist_ok=True)
     if dist.is_initialized():
@@ -215,7 +205,7 @@ if __name__ == "__main__":
     logger.info(f"🎚 Config: {config}")
     run = None
     if utils.is_main_process():
-        wandb.finish()  # Clear out any previous runs.
+        wandb.finish()
         wandb_id = (
             wandb.util.generate_id()
             if config.logging.wandb_id is None
@@ -242,12 +232,9 @@ if __name__ == "__main__":
     )
 
     # Initialize model and optimizer
-    embed_mat, embed_dim = layers.auto_extract_embed_mat(
-        config.model.embed_model_name)
+    embed_mat, embed_dim = layers.auto_extract_embed_mat(config.model.embed_model_name)
     inner_model = layers.MaskConditionalTransformer(
-        embed_dim=config.model.bottleneck_dim
-        if config.model.bottleneck_dim
-        else embed_dim,
+        embed_dim=utils.default(config.model.bottleneck_dim, embed_dim),
         model_dim=config.model.model_dim,
         max_seq_len=config.model.seq_len,
         head_dim=config.model.head_dim,
@@ -264,11 +251,12 @@ if __name__ == "__main__":
     )
     optimizer = torch.optim.AdamW(
         utils.get_grouped_params(
-            model, config.optimizer.weight_decay,
+            model,
+            config.optimizer.weight_decay,
             exlcuded_modules=(
                 torch.nn.LayerNorm,
                 torch.nn.Embedding,
-            )
+            ),
         ),
         lr=config.optimizer.lr,
         weight_decay=config.optimizer.weight_decay,
