@@ -175,8 +175,8 @@ def ddpm_step(
 
 
 def corrupt(
-    inputs: Tensor,  # x₀
-    time: Tensor,  # t
+    inputs: Tensor,      # x₀
+    time: Tensor,        # t
     schedule: Callable,  # ᾱ schedule
 ) -> Tensor:
     """q sampler: q(xₜ | xₒ) ~ N(xₒ * √ᾱₜ, (1 - ᾱₜ)I)
@@ -200,6 +200,7 @@ class TextSed(nn.Module):
         self,
         model: nn.Module,
         embed_mat: NamedTensor["vocab", "embed"],
+        *,
         use_self_cond: bool = True,
         noise_schedule: Callable = get_noise_schedule("cosine"),
         bottleneck_dim: Optional[int] = None,
@@ -300,6 +301,7 @@ class TextSed(nn.Module):
         )
         cond_mask: NamedTensor["batch", "pos", "1"] = cond_mask[..., None]
         # Remove padding positions from the conditioning/infilling masks
+        # TODO (jon-tow): We shouldn't need to do this - remove this once verified
         cond_mask = cond_mask * attention_mask
         infill_mask = (1 - cond_mask) * attention_mask
 
@@ -372,8 +374,7 @@ class TextSed(nn.Module):
             use_clamp: Whether to clamp predicted embeddings to the range
                 [-1, 1] before each diffusion sampling step.
         """
-        default_cond_mask = torch.zeros(shape[:-1], device=device)[..., None]
-        cond_mask = utils.default(cond_mask, default_cond_mask).bool()
+        cond_mask = utils.default(cond_mask, torch.zeros(shape[:-1], device=device)[..., None]).bool()
         infill_mask = (~cond_mask).float()
 
         # Sample start embedding from the normal prior eₜ ~ qₜ
@@ -382,15 +383,12 @@ class TextSed(nn.Module):
         for step in range(num_steps):
             # Get time for current and next states. NOTE: (1 - ...) to process in reverse
             time_now = torch.tensor([1 - step / num_steps], device=device)
-            time_next = torch.tensor(
-                [
-                    torch.maximum(
-                        torch.tensor(1 - (step + 1 + time_delta) / num_steps),
-                        torch.tensor(0.0),
-                    )
-                ],
-                device=device,
-            )
+            time_next = torch.tensor([
+                torch.maximum(
+                    torch.tensor(1 - (step + 1 + time_delta) / num_steps),
+                    torch.tensor(0.0),
+                )
+            ], device=device)
 
             # if (
             #     guide_scale is not None and cond_mask is None

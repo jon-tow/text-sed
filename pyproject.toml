@@ -1,22 +1,9 @@
-[build-system]
-requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-where = ["text_sed"] 
-include = ["text_sed*"]
-
-[tool.black]
-line-length = 88
-
-[tool.isort]
-profile = "black"
-
 [project]
 name = "text-sed"
-version = "0.0.1"
-requires-python = ">=3.8"
 description = "A PyTorch implementation of Self-conditioned Embedding Diffusion"
+authors = [{name = "Jonathan Tow", email = "jonathantow1@gmail.com"}]
+dynamic = ["version"]
+requires-python = ">=3.8"
 keywords = ["nlp", "pytorch", "machine-learning", "text-generation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -31,13 +18,20 @@ dependencies = [
     "transformers",
 ]
 
-[[project.authors]]
-author = "Jonathan Tow"
-email = "jonathantow1@gmail.com"
-
-[project.license]
-text = "MIT"
-
 [project.optional-dependencies]
 dev = ["black", "flake8", "isort"]
 train = ["datasets", "omegaconf", "wandb", "tqdm"]
+
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm[toml]>=6.2", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["text_sed"] 
+include = ["text_sed*"]
+
+[tool.black]
+line-length = 101
+
+[tool.isort]
+profile = "black"
