@@ -50,6 +50,31 @@ class ConditionScaleAndBias(nn.Module):
         return (1 + scale) * inputs + bias
 
 
+# Initializers
+
+
+@torch.no_grad()
+def small_init_(weight: NamedTensor["out", "in"], gain: float = 1.):
+    """SmallInit with truncated Normal (Modified Xavier Normal):
+        √(2 / (d + 4d))
+    Reference: Section 2.2 of Nyugen and Salazar "Transformers without Tears" (2019)
+        https://arxiv.org/abs/1910.05895
+    """
+    fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(weight)
+    std = gain * math.sqrt(2. / float(fan_in + 4 * fan_out))
+    torch.nn.init.trunc_normal_(weight, mean=0., std=std)
+
+
+@torch.no_grad()
+def wang_init_(weight: NamedTensor["out", "in"], num_layers: float, gain: float = 1.):
+    """Ben Wang's init for GPT-J but with a 1 in the sqrt numerator instead of 2.
+    Reference: TODO: Add link to proper reference.
+    """
+    _, fan_out = nn.init._calculate_fan_in_and_fan_out(weight)
+    std = gain * math.sqrt(1. / (num_layers * float(fan_out)))
+    torch.nn.init.trunc_normal_(weight, mean=0.0, std=std)
+
+
 # Word/Token Embedding Layers
 
 
@@ -450,6 +475,26 @@ class MaskConditionalTransformer(nn.Module):
             nn.Linear(model_dim, embed_dim, bias=True),
         )
         self.final_norm = nn.LayerNorm(embed_dim)
+        self._init_weights()
+
+    def _init_weights(self):
+        def _module_init_(module):
+            if isinstance(module, nn.Linear):
+                small_init_(module.weight, gain=1.0)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+        for module in [self.in_proj, *self.out_proj, self.final_norm]:
+            _module_init_(module)
+        for block in self.blocks:
+            for module in [block.in_proj, block.attn_proj, block.norm]:
+                _module_init_(module)
+            wang_init_(block.ff_proj.weight, self.num_layers)
+            if block.ff_proj.bias is not None:
+                nn.init.zeros_(block.ff_proj.bias)
 
     def forward(
         self,

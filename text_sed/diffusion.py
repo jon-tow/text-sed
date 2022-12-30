@@ -308,8 +308,8 @@ class TextSed(nn.Module):
         # Create re-usable embeddings
         noisy_embeds = infill_mask * noisy_embeds
         cond_embeds = torch.zeros_like(embeds, dtype=embeds.dtype)
-        prev_embeds = torch.zeros_like(noisy_embeds, dtype=noisy_embeds.dtype)
-        
+        prev_embeds = torch.zeros_like(embeds, dtype=embeds.dtype)
+
         # Compute self-conditioning estimate and get the conditioning embeddings
         if use_self_cond and random.random() > 0.5:
             with torch.no_grad():
