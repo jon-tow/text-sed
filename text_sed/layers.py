@@ -380,8 +380,8 @@ class ParallelEncoderBlock(nn.Module):
             units = self.conditioner(units, time_embeds)
 
         # Input Projections: [..., pos, *fused_dims]
-        proj_units = self.in_proj(units)
-        q, k, v, ff, ff_gate = split_fused_proj(proj_units, self.fused_dims)
+        fused_units = self.in_proj(units)
+        q, k, v, ff, ff_gate = split_fused_proj(fused_units, self.fused_dims)
 
         # Self-Attention
         # [..., num_heads, pos, head_dim]
@@ -432,7 +432,7 @@ class MaskConditionalTransformer(nn.Module):
             else None
         )
 
-        # 2x b/c of self-conditioning concat of input and condition signal
+        # 4x b/c of concatenated inputs (noise/conditioning/self-conditioning/infill)
         self.in_proj = nn.Linear(4 * embed_dim, model_dim, bias=True)
         self.blocks = nn.ModuleList([
             ParallelEncoderBlock(

@@ -8,16 +8,32 @@ Implementation of Strudel et al.'s ["Self-conditioned Embedding Diffusion for Te
 pip install -e ".[dev, train]"
 ```
 
+## Experimental Samples 
+
+Non-cherry picked samples from various experiments to track progress with the eventual goal of reproducing the results from the paper using large scale pre-training. 
+
+* __Unconditionallly__ generated samples obtained from training text-sed on the simple [E2E](https://huggingface.co/datasets/e2e_nlg) dataset for 17k steps with the config [here](configs/e2e.yaml).
+  ```markdown
+  ➜ The Golden Palace is a mid priced restaurant that has a rating of 1 out of 5.
+  ➜ There is a children friendly priced restaurant that offers English food called The Twenty Two.
+  ➜ Taste of Cambridge is a nice family friendly fast food pub in the riverside area, near The Sorrento.
+  ➜ In the city centre lies The Golden Palace, a above average coffee shop serving French cuisine. Previous its customers,, unfortunately because it 3 out of 5.
+  ➜ Strada specializes in Chinese food. They are a pub near Yippee Noodle Bar and has a rating of 1 out of 5.
+  ➜ The Vaults is a high priced restaurant serving Indian food. It is kid friendly and is moderately priced.
+  ➜ The Waterman is a kid friendly restaurant that serves Japanese food near the city center. They are moderately priced.
+  ➜ The Punter is a Chinese restaurant, with an average rating. The food is cheap.
+  ```
+
 ## TODOs
 
 * [ ] Add span masking and cfg for conditional generation.
 * [ ] Add EMA warmup.
 * [ ] Add Karras samplers.
+* [ ] Add conditional generation examples/samples.
 
 ## Appreciation
 
 * Katherine Crowson's [`k-diffusion` repo](https://github.com/crowsonkb/k-diffusion)
-
 
 ## Citations
 
