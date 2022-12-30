@@ -305,15 +305,12 @@ class TextSed(nn.Module):
         cond_mask = cond_mask * attention_mask
         infill_mask = (1 - cond_mask) * attention_mask
 
-        # Create re-usable masked embeddings
+        # Create re-usable embeddings
         noisy_embeds = infill_mask * noisy_embeds
         cond_embeds = torch.zeros_like(embeds, dtype=embeds.dtype)
-        if random.random() > 0.5:
-            # Get the ("clean") conditioning embeddings: c1 c2 n1 n2 n3 c3 -> c1 c2 0 0 0 c3
-            cond_embeds = cond_mask * embeds
-
-        # Compute self-conditioning estimate
         prev_embeds = torch.zeros_like(noisy_embeds, dtype=noisy_embeds.dtype)
+        
+        # Compute self-conditioning estimate and get the conditioning embeddings
         if use_self_cond and random.random() > 0.5:
             with torch.no_grad():
                 prev_embeds = self.model(
@@ -323,6 +320,8 @@ class TextSed(nn.Module):
                     infill_mask=infill_mask,
                     time=time,
                 ).detach()
+            # Get the ("clean") conditioning embeddings: c1 c2 n1 n2 n3 c3 -> c1 c2 0 0 0 c3
+            cond_embeds = cond_mask * embeds
 
         # Predict embeddings
         pred_embeds = self.model(

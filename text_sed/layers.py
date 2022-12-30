@@ -348,8 +348,8 @@ class ParallelEncoderBlock(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = utils.default(head_dim, model_dim // num_heads)
-        # Scaled dot-product attention factor: 1 / √dₖ
-        self.softmax_scale = self.head_dim**-0.5
+        self.softmax_scale = self.head_dim**-0.5  # Scaled dot-product attention factor: 1 / √dₖ
+
         self.norm = nn.LayerNorm(model_dim)
         self.act = FusedGELU()
 
@@ -362,7 +362,7 @@ class ParallelEncoderBlock(nn.Module):
         attn_dims = 3 * (num_heads * self.head_dim,)
         ff_dims = 2 * (ff_mult * model_dim,)  # 2 * [4 * model_dim]
         self.fused_dims = (*attn_dims, *ff_dims)
-        self.proj_in = nn.Linear(model_dim, sum(self.fused_dims), bias=False)
+        self.in_proj = nn.Linear(model_dim, sum(self.fused_dims), bias=False)
 
         # Output projections
         self.attn_proj = nn.Linear(num_heads * self.head_dim, model_dim, bias=True)
@@ -379,8 +379,8 @@ class ParallelEncoderBlock(nn.Module):
         if self.conditioner:
             units = self.conditioner(units, time_embeds)
 
-        # Input Projects: [..., pos, *fused_dims]
-        proj_units = self.proj_in(units)
+        # Input Projections: [..., pos, *fused_dims]
+        proj_units = self.in_proj(units)
         q, k, v, ff, ff_gate = split_fused_proj(proj_units, self.fused_dims)
 
         # Self-Attention
@@ -447,7 +447,7 @@ class MaskConditionalTransformer(nn.Module):
         ])
         self.out_proj = nn.Sequential(
             nn.LayerNorm(model_dim),
-            nn.Linear(model_dim, embed_dim),
+            nn.Linear(model_dim, embed_dim, bias=True),
         )
         self.final_norm = nn.LayerNorm(embed_dim)
 
