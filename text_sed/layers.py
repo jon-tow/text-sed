@@ -556,7 +556,8 @@ def get_prefix_mask(seq_len: int, rate: float = 0.75) -> torch.Tensor:
     indices = torch.arange(0, seq_len)
     prefix_len = random.randint(0, int(seq_len * rate) - 1)
     if random.random() > 0.5:
-        return torch.ones((seq_len), dtype=torch.bool)
+        # At random, ignore the prefix mask
+        return torch.zeros((seq_len), dtype=torch.bool)
     return indices > prefix_len
 
 

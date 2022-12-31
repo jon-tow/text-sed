@@ -264,7 +264,7 @@ class TextSed(nn.Module):
                 )
             elif self.mask_type == "prefix":
                 masks.append(
-                    get_prefix_mask(num_pos, prefix_rate=self.mask_prefix_rate)
+                    get_prefix_mask(num_pos, rate=self.mask_prefix_rate)
                 )
         return torch.stack(masks).to(device)
 
