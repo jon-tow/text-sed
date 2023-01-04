@@ -255,17 +255,14 @@ class TextSed(nn.Module):
         device: torch.device,
     ) -> NamedTensor["batch", "pos"]:
         """Returns a mask for the conditioning positions."""
-        # TODO: Try batching this better - no loop!
         masks = []
+        if self.mask_type == "span":
+            mask_func = functools.partial(get_span_mask, max_num_spans=self.mask_max_num_spans)
+        elif self.mask_type == "prefix":
+            mask_func = functools.partial(get_prefix_mask, rate=self.mask_prefix_rate)
+        # TODO: Try batching this better - no loop!
         for _ in range(batch_size):
-            if self.mask_type == "span":
-                masks.append(
-                    get_span_mask(num_pos, max_num_spans=self.mask_max_num_spans)
-                )
-            elif self.mask_type == "prefix":
-                masks.append(
-                    get_prefix_mask(num_pos, rate=self.mask_prefix_rate)
-                )
+            masks.append(mask_func(num_pos))
         return torch.stack(masks).to(device)
 
     def forward(
@@ -279,7 +276,7 @@ class TextSed(nn.Module):
         Args:
             input_ids: The input token sequence.
             attention_mask: The attention mask for the input sequence.
-            cond_mask: Mask with 1s for condition positions and 0s for infilling positions.
+            cond_mask: Mask with 1s for conditioning positions and 0s for infilling positions.
         """
         batch_size, num_pos = input_ids.shape[0], input_ids.shape[1]
         attention_mask = utils.default(
@@ -358,27 +355,34 @@ class TextSed(nn.Module):
         sampler: Callable = ddim_step,
         use_clamp: bool = False,
         time_delta: float = 0.0,
+        input_ids: Optional[NamedTensor["batch", "pos"]] = None,
         cond_mask: Optional[NamedTensor["batch", "pos"]] = None,
-        guide_scale: Optional[float] = None,
+        guide_name: Optional[str] = None,
+        guide_scale: float = 1.0,
         device: Device = "cuda:0",
     ) -> NamedTensor:
         """p sampler
         Sampler for the reverse diffusion process (denoising).
 
-        TODO: Remove unicode characters from code after coming up with concise
-        names.
-
         Args:
-            time_delta: Asymmetric time interval shift, t → (t - Δ)
+            time_delta: Asymmetric time interval shift, t → (t - Δ).
+            input_ids: Conditioning input sequence.
+            cond_mask: The conditioning mask for the input sequence.
+            guidance_name: The name of the guidance technique to use for the
+                generation. Choices: ["self_guidance", "class_free_guidance"]
+            guide_scale: The guidance scale >= 1.0.
             use_clamp: Whether to clamp predicted embeddings to the range
                 [-1, 1] before each diffusion sampling step.
         """
-        cond_mask = utils.default(cond_mask, torch.zeros(shape[:-1], device=device)[..., None]).bool()
-        infill_mask = (~cond_mask).float()
+        use_guidance = utils.exists(guide_name)
+        cond_mask: NamedTensor["batch", "pos", "1"] = utils.default(
+            cond_mask, torch.zeros(shape[:-1], device=device)[..., None]).bool()
+        infill_mask: NamedTensor["batch", "pos", "1"] = (~cond_mask).float()
 
         # Sample start embedding from the normal prior eₜ ~ qₜ
-        eₜ_prev = torch.randn(shape, device=device)
-        pred_eₒ = torch.zeros_like(eₜ_prev)
+        embed_t = torch.randn(shape, device=device)  # eₜ
+        embed_pred = torch.zeros_like(embed_t)       # eₒ
+
         for step in range(num_steps):
             # Get time for current and next states. NOTE: (1 - ...) to process in reverse
             time_now = torch.tensor([1 - step / num_steps], device=device)
@@ -389,46 +393,71 @@ class TextSed(nn.Module):
                 )
             ], device=device)
 
-            # if (
-            #     guide_scale is not None and cond_mask is None
-            # ):  # Self-conditioning guidance
-            #     # Predict start embeds (eₒ) without self-cond
-            #     ũₒ = self.model(eₜ_prev, torch.zeros_like(eₜ_prev), time_now)
-            #     # Predict start embeds (eₒ) with self-conditiong
-            #     c̃ₒ = self.model(eₜ_prev, ũₒ, time_now)
-            #     # Apply self-conditioning guidance
-            #     pred_eₒ = guide_scale * c̃ₒ + (1.0 - guide_scale) * ũₒ
-            # elif guide_scale is not None and conds is not None:  # Classifier Free Guidance
-            #     # Predict start embeds (eₒ) without self-cond
-            #     cond_embeds = self.read_in(conds)
-            #     ũₒ = self.model(eₜ_prev, torch.zeros_like(eₜ_prev), time_now)
-            #     # Predict start embeds (eₒ) with self-conditiong
-            #     c̃ₒ = self.model(eₜ_prev, ũₒ, time_now)
-            #     pred_eₒ = guide_scale * ũₒ
-            # else:
-
-            # Self-conditioned prediction using the previous predictions, ẽₒ
-            pred_eₒ = self.model(
-                noisy_embeds=infill_mask * eₜ_prev,
-                cond_embeds=cond_mask * eₜ_prev,
-                prev_embeds=infill_mask * pred_eₒ,
-                infill_mask=infill_mask,
-                time=time_now,
-            )
+            if use_guidance and guide_name == "self_guidance":
+                # Predict start embeds (eₒ) without self-conditioning
+                embed_pred_uncond = self.model(
+                    noisy_embeds=embed_t,
+                    cond_embeds=torch.zeros_like(embed_t),
+                    prev_embeds=torch.zeros_like(embed_t),
+                    infill_mask=infill_mask,
+                    time=time_now,
+                )
+                # Predict start embeds (eₒ) with self-conditioning
+                embed_pred_selfcond = self.model(
+                    noisy_embeds=embed_t,
+                    cond_embeds=torch.zeros_like(embed_t),
+                    prev_embeds=infill_mask * embed_pred_uncond,
+                    infill_mask=infill_mask,
+                    time=time_now,
+                )
+                # Apply self-conditioning guidance
+                embed_pred = guide_scale * embed_pred_selfcond + (1.0 - guide_scale) * embed_pred_uncond
+            elif use_guidance and guide_name == "class_free_guidance":
+                # Predict start embeds (eₒ) without conditioning
+                embed_pred_uncond = self.model(
+                    noisy_embeds=embed_t,
+                    cond_embeds=torch.zeros_like(embed_t),
+                    prev_embeds=torch.zeros_like(embed_t),
+                    infill_mask=infill_mask,
+                    time=time_now,
+                )
+                # Predict start embeds (eₒ) with conditioning inputs
+                if utils.exists(input_ids):
+                    cond_embeds = self.read_in(input_ids)
+                else:
+                    cond_embeds = torch.zeros_like(embed_t)
+                embed_pred_cond = self.model(
+                    noisy_embeds=embed_t,
+                    cond_embeds=cond_mask * cond_embeds,
+                    prev_embeds=infill_mask * embed_pred_uncond,
+                    infill_mask=infill_mask,
+                    time=time_now
+                )
+                # Apply classifier-free guidance
+                embed_pred = guide_scale * embed_pred_cond + (1.0 - guide_scale) * embed_pred_uncond
+            else:
+                # Self-conditioned prediction using the previous predictions, ẽₒ
+                embed_pred = self.model(
+                    noisy_embeds=infill_mask * embed_t,
+                    cond_embeds=cond_mask * embed_t,
+                    prev_embeds=infill_mask * embed_pred,
+                    infill_mask=infill_mask,
+                    time=time_now,
+                )
 
             if use_clamp:
                 # Clamping Trick (see footnote 6 in the paper):
                 #   The model additionally maps the predicted vector fθ(xₜ, t) to
                 #   its nearest word embedding sequence.
                 # Li et al. "Diffusion-LM Improves Controllable Text Generation". 2022
-                pred_eₒ = torch.clamp(pred_eₒ, -1.0, 1.0)
+                embed_pred = torch.clamp(embed_pred, -1.0, 1.0)
 
             # Estimate embeds at time_next eₜ₋₁
-            eₜ_prev = sampler(
-                eₜ_prev, pred_eₒ, time_now, time_next, self.noise_schedule
+            embed_t = sampler(
+                embed_t, embed_pred, time_now, time_next, self.noise_schedule
             )
 
         # Token decoding: continous embeddings to discrete tokens
-        logits = self.read_out(pred_eₒ)
+        logits = self.read_out(embed_pred)
         tokens = torch.argmax(logits, dim=-1)
         return tokens

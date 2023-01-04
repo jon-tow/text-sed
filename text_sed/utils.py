@@ -2,7 +2,7 @@ import logging
 import os
 import sys
 from functools import partial
-from typing import Any, List, NewType, Optional, Tuple, Union
+from typing import Any, Iterable, List, NewType, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -95,11 +95,10 @@ def param_count(model: torch.nn.Module) -> int:
 def get_grouped_params(
     model: torch.nn.Module,
     weight_decay: float,
-    included_modules: Tuple[torch.nn.Module] = (torch.nn.Linear,),
-    exlcuded_modules: Tuple[torch.nn.Module] = (torch.nn.LayerNorm, torch.nn.Embedding),
+    included_modules: Iterable[torch.nn.Module] = (torch.nn.Linear,),
+    exlcuded_modules: Iterable[torch.nn.Module] = (torch.nn.LayerNorm, torch.nn.Embedding),
 ):
-    """Removes weight decay from parameters with names containing any of the
-    strings in `no_decay`.
+    """Removes weight decay from parameters in the excluded modules iterable.
     Reference: https://github.com/karpathy/minGPT/blob/7218bcfa527c65f164de791099de715b81a95106/mingpt/model.py#L215
     """
     decay = set()
@@ -110,11 +109,10 @@ def get_grouped_params(
                 "%s.%s" % (module_name, param_name) if module_name else param_name
             )
             # NOTE: because named_modules and named_parameters are recursive
-            # we will see the same tensors p many many times. Doing it this way
-            # allows us to know which parent module any tensor p belongs to...
+            # we will see the same tensors many times. Doing it this way allows
+            # us to know which parent module any tensor p belongs to.
             if param_name.endswith("bias") or param.ndim < 2:
-                # All biases will not be decayed
-                no_decay.add(full_param_name)
+                no_decay.add(full_param_name)  # All biases will not be decayed
             elif param_name.endswith("weight") and isinstance(module, included_modules):
                 decay.add(full_param_name)
             elif param_name.endswith("weight") and isinstance(module, exlcuded_modules):

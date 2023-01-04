@@ -11,6 +11,7 @@ model:
   num_heads: 16
   seq_len: 64
   max_gen_len: ${seq_len}
+  mask_type: span 
   max_num_spans: 1
   num_steps: 1000
   num_gen_steps: 1000

@@ -247,6 +247,7 @@ if __name__ == "__main__":
         embed_mat=embed_mat,
         noise_schedule=diffusion.get_noise_schedule(config.model.noise_schedule),
         bottleneck_dim=config.model.bottleneck_dim,
+        mask_type=config.model.mask_type,
         max_num_spans=config.model.max_num_spans,
     )
     optimizer = torch.optim.AdamW(
