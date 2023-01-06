@@ -255,14 +255,11 @@ class TextSed(nn.Module):
         device: torch.device,
     ) -> NamedTensor["batch", "pos"]:
         """Returns a mask for the conditioning positions."""
-        masks = []
         if self.mask_type == "span":
             mask_func = functools.partial(get_span_mask, max_num_spans=self.mask_max_num_spans)
         elif self.mask_type == "prefix":
             mask_func = functools.partial(get_prefix_mask, rate=self.mask_prefix_rate)
-        # TODO: Try batching this better - no loop!
-        for _ in range(batch_size):
-            masks.append(mask_func(num_pos))
+        masks = [mask_func(num_pos) for _ in range(batch_size)]
         return torch.stack(masks).to(device)
 
     def forward(

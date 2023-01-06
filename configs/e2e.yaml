@@ -10,19 +10,22 @@ model:
   head_dim: null
   num_heads: 16
   seq_len: 32
-  max_gen_len: ${seq_len}
-  max_num_spans: 1
-  num_steps: 1000
-  num_gen_steps: 1000
   use_abs_pos: false
   use_rotary: true
-  guide_scale: null
+  mask_type: span
+  max_num_spans: 1
   ema_decay: 0.999
   ema_every: 1
+
+  # Diffusion configs
   noise_schedule: cosine
+  sampler: ddim
+  num_steps: 1000
+  max_gen_len: ${seq_len}
+  num_gen_steps: ${num_steps}
+  guide_scale: null
   use_self_cond: true
   time_delta: 0.0
-  sampler: ddim
 
 optimizer:
   type: adamw
@@ -65,6 +68,7 @@ data:
 
 logging:
   wandb_id: null
-  wandb_entity: null 
+  wandb_entity: null
   wandb_project: ${name}
   wandb_group: "Processes"
+  wandb_mode: null # "online"

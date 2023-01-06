@@ -29,6 +29,7 @@ Non-cherry picked samples from various experiments to track progress with the ev
 * [ ] Add span masking and cfg for conditional generation.
 * [ ] Add EMA warmup.
 * [ ] Add Karras samplers.
+* [ ] Try linearly increasing the guidance scale through the sampling procedure to reduce diversity hits (see [Section 2.7 of Muse](https://arxiv.org/pdf/2301.00704.pdf)).
 * [ ] Add conditional generation examples/samples.
 
 ## Appreciation

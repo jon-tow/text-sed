@@ -29,7 +29,7 @@ def train(
     scaler: torch.cuda.amp.GradScaler,
     tokenizer: transformers.PreTrainedTokenizer,
     step_state: int = 0,
-    run: Optional["wandb.Run"] = None,
+    tracker: Optional["wandb.Run"] = None,
     device: Union[torch.device, str] = "cuda:0",
 ):
     # Initialize datasets
@@ -101,7 +101,7 @@ def train(
         if step % config.train.log_every == 0 and utils.is_main_process():
             # Log learning across all param groups
             stats["learning_rate"] = lr_scheduler.get_last_lr()[0]
-            run.log({f"train/{k}": v for k, v in stats.items()}, step=step)
+            tracker.log({f"train/{k}": v for k, v in stats.items()}, step=step)
             info = f"🎛 Step: {step}/{config.train.total_steps} "
             info += f"𑗔 Loss: {loss:.5f} "
             info += f"𑗔 MSE Loss: {stats['loss_mse']:.5f} "
@@ -121,7 +121,7 @@ def train(
             valid_inputs = next(valid_iter)["input_ids"].to(device)[0]
             with torch.no_grad():
                 _, valid_stats = model(valid_inputs)
-            run.log({f"valid/{k}": v for k, v in valid_stats.items()}, step=step)
+            tracker.log({f"valid/{k}": v for k, v in valid_stats.items()}, step=step)
             model.train()
 
         # Generate samples
@@ -203,7 +203,7 @@ if __name__ == "__main__":
     logger = utils.init_logger(config.output_dir)
     logger.info(f"🖥 Device Count: {dist.get_world_size()}")
     logger.info(f"🎚 Config: {config}")
-    run = None
+    tracker = None
     if utils.is_main_process():
         wandb.finish()
         wandb_id = (
@@ -211,11 +211,12 @@ if __name__ == "__main__":
             if config.logging.wandb_id is None
             else config.logging.wandb_id
         )
-        run = wandb.init(
+        tracker = wandb.init(
             project=config.logging.wandb_project,
             entity=config.logging.wandb_entity,
             name=f"{config.name}-{wandb_id}",
             config=utils.flatten_dict(oc.OmegaConf.to_container(config)),
+            mode=utils.default(config.logging.get("wandb_mode", None), "disabled"),
             id=wandb_id,
         )
 
@@ -311,5 +312,5 @@ if __name__ == "__main__":
         scaler=scaler,
         tokenizer=tokenizer,
         step_state=step_state,
-        run=run,
+        tracker=tracker,
     )
